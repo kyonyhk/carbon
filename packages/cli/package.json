@@ -1,0 +1,12 @@
+{
+  "name": "@carbon/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "carbon": "./src/main.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.110.0",
+    "@carbon/core": "workspace:*"
+  }
+}
