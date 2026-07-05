@@ -11,8 +11,7 @@ See [SPEC.md](./SPEC.md) for the architecture and roadmap.
 bun install
 ```
 
-Auth resolves like the Anthropic SDK: `ANTHROPIC_API_KEY`, or a profile from
-`ant auth login`.
+Auth is the Anthropic SDK default: set `ANTHROPIC_API_KEY` in your environment.
 
 ## Use
 
@@ -30,11 +29,19 @@ bun run packages/cli/src/main.ts -c
 bun run packages/cli/src/main.ts -y
 ```
 
-Link it globally so `carbon` works anywhere:
+Ctrl+C during a run interrupts the current turn (the conversation stays usable);
+Ctrl+C at the idle prompt exits. Sessions are append-only JSONL, so `carbon -c`
+always resumes exactly where you were.
+
+## Install globally
 
 ```sh
-cd packages/cli && bun link && cd - && bun link @carbon/cli
+cd packages/cli && bun link
 ```
+
+This puts a `carbon` command on your PATH (via `~/.bun/bin`) that runs the live
+source — like `claude`, you run it inside any project folder and it operates on
+that folder. Edits to this repo take effect immediately, no reinstall needed.
 
 ## Develop
 

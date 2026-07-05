@@ -74,6 +74,8 @@ function makePermissionHook(options: {
   yolo: boolean;
   rl?: Interface;
   alwaysAllowed: Set<string>;
+  /** Signal of the currently active run, so Ctrl+C cancels a pending prompt. */
+  getSignal?: () => AbortSignal | undefined;
 }): CanUseTool {
   return async (tool, input) => {
     if (options.yolo || options.alwaysAllowed.has(tool.name)) {
@@ -85,9 +87,20 @@ function makePermissionHook(options: {
         message: `Tool "${tool.name}" requires approval; rerun with --yolo to allow tools in print mode.`,
       };
     }
-    const answer = await options.rl.question(
-      `\n${bold(`allow ${tool.name}?`)} ${dim(toolPreview(tool.name, input))} [y/n/a] `,
-    );
+    const signal = options.getSignal?.();
+    if (signal?.aborted) {
+      return { behavior: "deny", message: "Interrupted by user." };
+    }
+    let answer: string;
+    try {
+      answer = await options.rl.question(
+        `\n${bold(`allow ${tool.name}?`)} ${dim(toolPreview(tool.name, input))} [y/n/a] `,
+        signal ? { signal } : {},
+      );
+    } catch {
+      // Question aborted by Ctrl+C mid-prompt.
+      return { behavior: "deny", message: "Interrupted by user." };
+    }
     const choice = answer.trim().toLowerCase();
     if (choice === "a") {
       options.alwaysAllowed.add(tool.name);
@@ -145,7 +158,9 @@ async function renderRun(
       }
       case "done":
         process.stdout.write("\n");
-        if (event.stopReason === "refusal") {
+        if (event.stopReason === "interrupted") {
+          process.stdout.write(dim("[interrupted — type a new message to continue]\n"));
+        } else if (event.stopReason === "refusal") {
           process.stdout.write(red("\n[the model declined this request]\n"));
         } else if (event.stopReason === "max_tokens") {
           process.stdout.write(red("\n[response hit the output token limit]\n"));
@@ -157,6 +172,10 @@ async function renderRun(
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_AUTH_TOKEN) {
+    console.error(red("No API key found. Set ANTHROPIC_API_KEY in your environment."));
+    process.exit(1);
+  }
   const cwd = process.cwd();
   const alwaysAllowed = new Set<string>();
 
@@ -186,7 +205,13 @@ async function main() {
       canUseTool: makePermissionHook({ yolo: args.yolo, alwaysAllowed }),
     });
     const totals = { input: 0, output: 0, cacheRead: 0 };
-    await renderRun(agent.run(args.print), totals);
+    try {
+      await renderRun(agent.run(args.print), totals);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(red(`\nerror: ${message}`));
+      process.exit(1);
+    }
     process.stdout.write(
       dim(`\n[tokens: ${totals.input} in, ${totals.cacheRead} cached, ${totals.output} out]\n`),
     );
@@ -194,13 +219,32 @@ async function main() {
   }
 
   const rl = createInterface({ input: process.stdin, output: process.stdout });
+
+  // Ctrl+C during a run interrupts the run; at the idle prompt it exits.
+  let activeController: AbortController | null = null;
+  const onInterrupt = () => {
+    if (activeController) {
+      activeController.abort();
+    } else {
+      process.stdout.write("\n");
+      process.exit(0);
+    }
+  };
+  rl.on("SIGINT", onInterrupt);
+  process.on("SIGINT", onInterrupt);
+
   const agent = new Agent({
     model: args.model,
     cwd,
     tools: coreTools(),
     session,
     messages,
-    canUseTool: makePermissionHook({ yolo: args.yolo, rl, alwaysAllowed }),
+    canUseTool: makePermissionHook({
+      yolo: args.yolo,
+      rl,
+      alwaysAllowed,
+      getSignal: () => activeController?.signal,
+    }),
   });
 
   console.log(bold("carbon") + dim(` · ${args.model} · ${cwd}`));
@@ -219,11 +263,14 @@ async function main() {
     if (trimmed.length === 0) continue;
     if (trimmed === "exit" || trimmed === "quit") break;
 
+    activeController = new AbortController();
     try {
-      await renderRun(agent.run(trimmed), totals);
+      await renderRun(agent.run(trimmed, { signal: activeController.signal }), totals);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.error(red(`\nerror: ${message}`));
+    } finally {
+      activeController = null;
     }
     process.stdout.write(
       dim(`[tokens: ${totals.input} in, ${totals.cacheRead} cached, ${totals.output} out]\n\n`),

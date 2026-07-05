@@ -4,6 +4,8 @@ import type Anthropic from "@anthropic-ai/sdk";
 export interface ToolContext {
   /** Working directory the agent operates in. */
   cwd: string;
+  /** Aborted when the user interrupts the run; long-running tools should honor it. */
+  signal?: AbortSignal;
 }
 
 export interface ToolResult {
@@ -38,7 +40,7 @@ export type CanUseTool = (
   input: unknown,
 ) => Promise<PermissionDecision>;
 
-export type StopReason = Anthropic.Message["stop_reason"];
+export type StopReason = Anthropic.Message["stop_reason"] | "interrupted";
 
 /**
  * Everything the agent does is surfaced as a stream of events. Mounts render

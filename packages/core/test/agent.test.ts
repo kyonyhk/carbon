@@ -182,3 +182,40 @@ describe("agent loop", () => {
     expect(events.at(-1)).toEqual({ type: "done", stopReason: "end_turn" });
   });
 });
+
+describe("interrupt", () => {
+  test("mid-batch abort synthesizes results and keeps history valid", async () => {
+    const controller = new AbortController();
+    const abortingTool: Tool<{ text: string }> = {
+      ...echoTool,
+      async execute(input) {
+        controller.abort(); // user hits ctrl-c while the first tool runs
+        return { output: `echo: ${input.text}` };
+      },
+    };
+    // Only one scripted message: if the loop tried a second API call after
+    // the abort, the fake client would throw.
+    const client = fakeClient([
+      message(
+        [
+          { type: "tool_use", caller: { type: "direct" }, id: "tu_1", name: "echo", input: { text: "a" } },
+          { type: "tool_use", caller: { type: "direct" }, id: "tu_2", name: "echo", input: { text: "b" } },
+        ],
+        "tool_use",
+      ),
+    ]);
+    const agent = new Agent({ client, tools: [abortingTool], cwd: tmpdir() });
+    const events = await collect(agent.run("go", { signal: controller.signal }));
+
+    // Second tool never started; run ended as interrupted.
+    expect(events.filter((e) => e.type === "tool_start")).toHaveLength(1);
+    expect(events.at(-1)).toEqual({ type: "done", stopReason: "interrupted" });
+
+    // Both tool_use blocks still got tool_results, so the next turn is valid.
+    const resultsMsg = agent.messages.at(-1)!;
+    const blocks = resultsMsg.content as Anthropic.ToolResultBlockParam[];
+    expect(blocks.map((b) => b.tool_use_id)).toEqual(["tu_1", "tu_2"]);
+    expect(blocks[1]!.is_error).toBe(true);
+    expect(blocks[1]!.content).toContain("Interrupted");
+  });
+});

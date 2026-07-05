@@ -26,13 +26,15 @@ export const bashTool: Tool<{ command: string; timeout?: number }> = {
     return new Promise((resolve) => {
       exec(
         input.command,
-        { cwd: ctx.cwd, timeout, maxBuffer: 10 * 1024 * 1024, shell: "/bin/bash" },
+        { cwd: ctx.cwd, timeout, maxBuffer: 10 * 1024 * 1024, shell: "/bin/bash", signal: ctx.signal },
         (error, stdout, stderr) => {
           const output = [stdout, stderr].filter((s) => s.length > 0).join("\n").trimEnd();
           if (error) {
-            const reason = error.killed
-              ? `Command timed out after ${timeout}ms`
-              : `Exit code ${error.code ?? "unknown"}`;
+            const reason = ctx.signal?.aborted
+              ? "Command interrupted by user"
+              : error.killed
+                ? `Command timed out after ${timeout}ms`
+                : `Exit code ${error.code ?? "unknown"}`;
             resolve({ output: output ? `${output}\n${reason}` : reason, isError: true });
           } else {
             resolve({ output: output || "(no output)" });

@@ -60,10 +60,31 @@ export class Agent {
     this.messages = options.messages ?? [];
   }
 
-  /** Run one user turn to completion. */
-  async *run(input: string): AsyncGenerator<AgentEvent, void> {
+  /**
+   * Run one user turn to completion. Aborting the signal interrupts the run
+   * cleanly: the in-flight request is cancelled, remaining tool calls get
+   * synthetic "interrupted" results (the API requires every tool_use to have
+   * a matching tool_result), and the generator ends with a "done" event whose
+   * stopReason is "interrupted". The agent stays usable for the next turn.
+   */
+  async *run(
+    input: string,
+    options: { signal?: AbortSignal } = {},
+  ): AsyncGenerator<AgentEvent, void> {
+    const { signal } = options;
     this.pushMessage({ role: "user", content: input });
+    try {
+      yield* this.loop(signal);
+    } catch (error) {
+      if (signal?.aborted) {
+        yield { type: "done", stopReason: "interrupted" };
+        return;
+      }
+      throw error;
+    }
+  }
 
+  private async *loop(signal?: AbortSignal): AsyncGenerator<AgentEvent, void> {
     while (true) {
       const stream = this.client.messages.stream({
         model: this.model,
@@ -81,7 +102,7 @@ export class Agent {
         ],
         tools: this.toolDefinitions(),
         messages: this.messages,
-      });
+      }, { signal });
 
       for await (const event of stream) {
         if (event.type !== "content_block_delta") continue;
@@ -113,8 +134,19 @@ export class Agent {
       );
       const results: Anthropic.ToolResultBlockParam[] = [];
       for (const call of toolCalls) {
+        // Interrupted mid-batch: the remaining calls still need results or the
+        // next request would be rejected for an unanswered tool_use.
+        if (signal?.aborted) {
+          results.push({
+            type: "tool_result",
+            tool_use_id: call.id,
+            content: "Interrupted by user before this tool ran.",
+            is_error: true,
+          });
+          continue;
+        }
         yield { type: "tool_start", id: call.id, name: call.name, input: call.input };
-        const result = await this.executeTool(call.name, call.input);
+        const result = await this.executeTool(call.name, call.input, signal);
         yield { type: "tool_result", id: call.id, name: call.name, result };
         results.push({
           type: "tool_result",
@@ -125,10 +157,19 @@ export class Agent {
       }
       // All results for one assistant turn go back in a single user message.
       this.pushMessage({ role: "user", content: results });
+
+      if (signal?.aborted) {
+        yield { type: "done", stopReason: "interrupted" };
+        return;
+      }
     }
   }
 
-  private async executeTool(name: string, input: unknown): Promise<ToolResult> {
+  private async executeTool(
+    name: string,
+    input: unknown,
+    signal?: AbortSignal,
+  ): Promise<ToolResult> {
     const tool = this.tools.get(name);
     if (!tool) {
       return { output: `Unknown tool: ${name}`, isError: true };
@@ -142,11 +183,14 @@ export class Agent {
         };
       }
     }
-    const ctx: ToolContext = { cwd: this.cwd };
+    const ctx: ToolContext = { cwd: this.cwd, signal };
     try {
       const result = await tool.execute(input, ctx);
       return { ...result, output: truncate(result.output) };
     } catch (error) {
+      if (signal?.aborted) {
+        return { output: "Interrupted by user.", isError: true };
+      }
       const message = error instanceof Error ? error.message : String(error);
       return { output: `Tool failed: ${message}`, isError: true };
     }
