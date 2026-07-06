@@ -1,3 +1,5 @@
+<img src="assets/carbon.png" alt="CARBON" width="100%" />
+
 # carbon
 
 A minimal agent harness. The structural spine — a headless agent loop, four
