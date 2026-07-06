@@ -3,10 +3,12 @@ import type Anthropic from "@anthropic-ai/sdk";
 import {
   Agent,
   coreTools,
+  createTaskTool,
   DEFAULT_MODEL,
   Session,
   type AgentEvent,
   type CanUseTool,
+  type Tool,
 } from "@carbon/core";
 import { createInterface, type Interface } from "node:readline/promises";
 
@@ -66,8 +68,41 @@ function parseArgs(argv: string[]): CliArgs {
 function toolPreview(name: string, input: unknown): string {
   const record = (input ?? {}) as Record<string, unknown>;
   if (name === "bash") return String(record.command ?? "");
+  if (name === "task") return String(record.description ?? "");
   if (typeof record.path === "string") return record.path;
   return JSON.stringify(input);
+}
+
+interface Totals {
+  input: number;
+  output: number;
+  cacheRead: number;
+}
+
+/** Task tool wired for the terminal: nested activity lines + shared token totals. */
+function makeTaskTool(options: {
+  model: string;
+  cwd: string;
+  hook: CanUseTool;
+  totals: Totals;
+}): Tool {
+  return createTaskTool({
+    model: options.model,
+    cwd: options.cwd,
+    canUseTool: options.hook,
+    onEvent: (event, task) => {
+      if (event.type === "tool_start") {
+        const preview = toolPreview(event.name, event.input);
+        const short = preview.length > 80 ? `${preview.slice(0, 80)}…` : preview;
+        process.stdout.write(dim(`    · [${task.description}] ${event.name} ${short}\n`));
+      } else if (event.type === "response_end") {
+        options.totals.input +=
+          event.usage.input_tokens + (event.usage.cache_creation_input_tokens ?? 0);
+        options.totals.cacheRead += event.usage.cache_read_input_tokens ?? 0;
+        options.totals.output += event.usage.output_tokens;
+      }
+    },
+  });
 }
 
 function makePermissionHook(options: {
@@ -208,15 +243,16 @@ async function main() {
 
   // Non-interactive print mode: one prompt, render, exit.
   if (args.print !== undefined) {
+    const totals: Totals = { input: 0, output: 0, cacheRead: 0 };
+    const hook = makePermissionHook({ yolo: args.yolo, alwaysAllowed });
     const agent = new Agent({
       model: args.model,
       cwd,
-      tools: coreTools(),
+      tools: [...coreTools(), makeTaskTool({ model: args.model, cwd, hook, totals })],
       session,
       messages,
-      canUseTool: makePermissionHook({ yolo: args.yolo, alwaysAllowed }),
+      canUseTool: hook,
     });
-    const totals = { input: 0, output: 0, cacheRead: 0 };
     try {
       await renderRun(agent.run(args.print), totals);
     } catch (error) {
@@ -245,18 +281,20 @@ async function main() {
   rl.on("SIGINT", onInterrupt);
   process.on("SIGINT", onInterrupt);
 
+  const totals: Totals = { input: 0, output: 0, cacheRead: 0 };
+  const hook = makePermissionHook({
+    yolo: args.yolo,
+    rl,
+    alwaysAllowed,
+    getSignal: () => activeController?.signal,
+  });
   const agent = new Agent({
     model: args.model,
     cwd,
-    tools: coreTools(),
+    tools: [...coreTools(), makeTaskTool({ model: args.model, cwd, hook, totals })],
     session,
     messages,
-    canUseTool: makePermissionHook({
-      yolo: args.yolo,
-      rl,
-      alwaysAllowed,
-      getSignal: () => activeController?.signal,
-    }),
+    canUseTool: hook,
   });
 
   if ((process.stdout.columns ?? 80) >= 78) {
@@ -268,7 +306,6 @@ async function main() {
   console.log(dim(`session: ${session.filePath}`));
   console.log(dim(`type a message, or "exit" to quit\n`));
 
-  const totals = { input: 0, output: 0, cacheRead: 0 };
   while (true) {
     let input: string;
     try {

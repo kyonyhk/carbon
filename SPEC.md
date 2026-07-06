@@ -69,10 +69,19 @@ Tools marked `readOnly: true` skip the hook entirely.
 
 - **M1 (this repo, done):** headless core, four tools, JSONL sessions,
   streaming, CLI mount with permission prompts, `--continue`, print mode.
-- **M2 — subagents:** a `task` tool that constructs a fresh `Agent` with its
-  own context and returns its final text. The harness invoking itself.
+- **M2 — subagents (done):** `createTaskTool()` — a `task` tool that runs a
+  fresh `Agent` to completion inside a tool call and returns its final message
+  text. The harness invoking itself. Design decisions: delegation is one level
+  deep (subagents get the four core tools, no task tool); the task tool is
+  `readOnly` because each subagent tool call is permission-checked
+  individually; the parent's abort signal flows into the subagent; mounts
+  observe subagent activity via an `onEvent` callback. Subagent turns are not
+  yet written to their own session files, and parallel `task` calls in one
+  batch still execute sequentially — both revisit later.
 - **M3 — memory:** filesystem memory directory injected into the system
   prompt; a CARBON.md project-instructions file loaded from cwd.
+  Co-design with graphite (the self-improvement experiment repo that mounts
+  carbon): memory files are graphite's primary mutation surface.
 - **M4 — context management:** token-threshold compaction (summarize the
   transcript, restart with the summary) using the session file as source.
 - **M5 — second mount:** something non-terminal (Slack, cron, or HTTP) to

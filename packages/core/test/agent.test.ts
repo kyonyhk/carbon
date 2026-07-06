@@ -4,6 +4,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "../src/agent.ts";
+import { createTaskTool } from "../src/tools/task.ts";
 import type { AgentEvent, Tool } from "../src/types.ts";
 
 /**
@@ -217,5 +218,75 @@ describe("interrupt", () => {
     expect(blocks.map((b) => b.tool_use_id)).toEqual(["tu_1", "tu_2"]);
     expect(blocks[1]!.is_error).toBe(true);
     expect(blocks[1]!.content).toContain("Interrupted");
+  });
+});
+
+describe("task tool (subagents)", () => {
+
+  test("runs a subagent and returns its final text", async () => {
+    const subClient = fakeClient([
+      message([{ type: "text", text: "subagent report: 42 files found", citations: null }], "end_turn"),
+    ]);
+    const seen: string[] = [];
+    const task = createTaskTool({
+      client: subClient,
+      onEvent: (event, t) => seen.push(`${t.description}:${event.type}`),
+    });
+    const result = await task.execute(
+      { description: "count files", prompt: "count the files" },
+      { cwd: tmpdir() },
+    );
+    expect(result.isError).toBeUndefined();
+    expect(result.output).toBe("subagent report: 42 files found");
+    expect(seen).toContain("count files:text");
+    expect(seen).toContain("count files:done");
+  });
+
+  test("parent agent round-trips through a subagent", async () => {
+    const subClient = fakeClient([
+      message([{ type: "text", text: "the answer is blue", citations: null }], "end_turn"),
+    ]);
+    const parentClient = fakeClient([
+      message(
+        [{
+          type: "tool_use", caller: { type: "direct" }, id: "tu_task", name: "task",
+          input: { description: "find the answer", prompt: "what color?" },
+        }],
+        "tool_use",
+      ),
+      message([{ type: "text", text: "done", citations: null }], "end_turn"),
+    ]);
+    const parent = new Agent({
+      client: parentClient,
+      tools: [createTaskTool({ client: subClient })],
+      cwd: tmpdir(),
+    });
+    const events = await collect(parent.run("go"));
+    const toolResult = events.find((e) => e.type === "tool_result");
+    expect(toolResult && toolResult.type === "tool_result" ? toolResult.result.output : "").toBe(
+      "the answer is blue",
+    );
+  });
+
+  test("subagent toolset excludes the task tool by default", () => {
+    const task = createTaskTool({});
+    // The description promises no recursion; the default tools must match.
+    expect(task.description).toContain("cannot spawn further subagents");
+  });
+
+  test("empty subagent report is surfaced as an error", async () => {
+    const subClient = fakeClient([
+      message(
+        [{ type: "tool_use", caller: { type: "direct" }, id: "tu_x", name: "missing", input: {} }],
+        "tool_use",
+      ),
+      message([], "end_turn"),
+    ]);
+    const task = createTaskTool({ client: subClient });
+    const result = await task.execute(
+      { description: "x", prompt: "y" },
+      { cwd: tmpdir() },
+    );
+    expect(result.isError).toBe(true);
   });
 });
