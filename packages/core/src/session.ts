@@ -10,9 +10,19 @@ export interface SessionMeta {
   model: string;
 }
 
+interface StoredMessage {
+  role: Anthropic.MessageParam["role"];
+  content: Anthropic.MessageParam["content"];
+}
+
 type SessionLine =
   | ({ type: "meta" } & SessionMeta)
-  | { type: "message"; ts: string; role: Anthropic.MessageParam["role"]; content: Anthropic.MessageParam["content"] };
+  | ({ type: "message"; ts: string } & StoredMessage)
+  // A compaction marker carries the full post-compaction message list, so
+  // reload replaces everything before it with this list — no need to
+  // reconcile the folded lines that already sit earlier in the file. The
+  // file stays the complete record; the summary is preserved verbatim.
+  | { type: "compaction"; ts: string; summary: string; messages: StoredMessage[] };
 
 /**
  * Append-only JSONL transcript. One file per session; first line is metadata,
@@ -71,9 +81,16 @@ export class Session {
       throw new Error(`Not a carbon session file (no meta line): ${filePath}`);
     }
     const { type: _type, ...meta } = metaLine;
-    const messages = lines
-      .filter((l): l is Extract<SessionLine, { type: "message" }> => l.type === "message")
-      .map((l) => ({ role: l.role, content: l.content }));
+    // Replay in order: messages accumulate, a compaction marker resets the
+    // working set to its stored post-compaction list.
+    let messages: Anthropic.MessageParam[] = [];
+    for (const line of lines) {
+      if (line.type === "message") {
+        messages.push({ role: line.role, content: line.content });
+      } else if (line.type === "compaction") {
+        messages = line.messages.map((m) => ({ role: m.role, content: m.content }));
+      }
+    }
     return { session: new Session(filePath, meta), messages };
   }
 
@@ -83,6 +100,17 @@ export class Session {
       ts: new Date().toISOString(),
       role: message.role,
       content: message.content,
+    };
+    appendFileSync(this.filePath, `${JSON.stringify(line)}\n`);
+  }
+
+  /** Record a compaction: the summary plus the full post-compaction message list. */
+  appendCompaction(messages: Anthropic.MessageParam[], summary: string): void {
+    const line: SessionLine = {
+      type: "compaction",
+      ts: new Date().toISOString(),
+      summary,
+      messages: messages.map((m) => ({ role: m.role, content: m.content })),
     };
     appendFileSync(this.filePath, `${JSON.stringify(line)}\n`);
   }

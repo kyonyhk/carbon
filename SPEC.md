@@ -98,7 +98,7 @@ Tools marked `readOnly: true` skip the hook entirely.
   policy, e.g. graphite's). Explicitly out of core: what counts as
   memorable, file formats, reflection/consolidation/decay, embeddings or
   search — see `~/Desktop/graphite-spec.md`, the first consumer.
-- **M4 — compaction:** client-side, in core. Server-side compaction (the
+- **M4 — compaction (done):** client-side, in core. Server-side compaction (the
   API beta) is rejected deliberately: it's provider-specific surface that
   won't exist on Anthropic-compatible endpoints, it makes transcripts
   non-self-describing, and it outsources a layer carbon exists to own.
@@ -110,12 +110,14 @@ Tools marked `readOnly: true` skip the hook entirely.
     `run()`, or between loop iterations before the next API call.
     Emergency fallback: on `model_context_window_exceeded`, compact and
     retry once.
-  - **Mechanics:** summarize `messages[]` with a dedicated prompt (in
-    `prompt.ts`, overridable via `AgentOptions`) that must capture task
-    state, decisions, files touched and their relevant state, unresolved
-    threads, and user preferences. Summarizer uses the session's own model.
-    Rebuild history as: one user message containing the summary in
-    `<compaction-summary>` tags → verbatim tail → new input.
+  - **Mechanics:** the summarizer is a direct `messages.create` call reusing
+    the session's *exact* system prompt and tool definitions, with
+    `COMPACTION_INSTRUCTION` (`prompt.ts`) appended as a final user message —
+    not a separate Agent. This keeps the history a cache read (~0.1x) instead
+    of a full re-read, and satisfies the API's requirement that tool
+    definitions accompany histories containing tool blocks. No thinking; 8k
+    output cap. Rebuild history as: one user message with the summary in
+    `<compaction-summary>` tags → verbatim tail.
   - **Cut boundary rule:** the verbatim tail starts at the most recent
     *real* user turn (text content, not tool results) so tool_use/
     tool_result pairing is never severed. Keep that last complete turn —

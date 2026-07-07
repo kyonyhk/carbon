@@ -1,10 +1,11 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { buildMemorySection, loadProjectInstructions } from "./memory.ts";
-import { DEFAULT_SYSTEM_PROMPT } from "./prompt.ts";
+import { COMPACTION_INSTRUCTION, DEFAULT_SYSTEM_PROMPT } from "./prompt.ts";
 import type { Session } from "./session.ts";
 import type {
   AgentEvent,
   CanUseTool,
+  StopReason,
   Tool,
   ToolContext,
   ToolResult,
@@ -13,6 +14,8 @@ import type {
 export const DEFAULT_MODEL = "claude-opus-4-8";
 
 const MAX_TOOL_OUTPUT_CHARS = 50_000;
+const DEFAULT_COMPACTION_THRESHOLD = 150_000;
+const SUMMARY_MAX_TOKENS = 8_000;
 
 export interface AgentOptions {
   client?: Anthropic;
@@ -31,6 +34,10 @@ export interface AgentOptions {
   projectInstructions?: boolean;
   /** Persistent memory directory. If set, its MEMORY.md index is injected into the system prompt at session start. */
   memoryDir?: string;
+  /** Compact when the estimated prompt size crosses this many tokens. Default 150k. */
+  compactionThreshold?: number;
+  /** Automatically compact when the threshold is crossed. Default true. */
+  autoCompact?: boolean;
 }
 
 /**
@@ -50,8 +57,12 @@ export class Agent {
   readonly tools: Map<string, Tool>;
   readonly session?: Session;
   readonly memoryDir?: string;
+  readonly compactionThreshold: number;
+  readonly autoCompact: boolean;
   messages: Anthropic.MessageParam[];
 
+  /** Estimated size of the next prompt, from the previous response's usage. */
+  private lastPromptTokens = 0;
   private canUseTool: CanUseTool;
 
   constructor(options: AgentOptions = {}) {
@@ -70,6 +81,8 @@ export class Agent {
     if (this.memoryDir) parts.push(buildMemorySection(this.memoryDir));
     this.systemPrompt = parts.join("\n\n");
     this.maxTokens = options.maxTokens ?? 64_000;
+    this.compactionThreshold = options.compactionThreshold ?? DEFAULT_COMPACTION_THRESHOLD;
+    this.autoCompact = options.autoCompact ?? true;
     this.tools = new Map((options.tools ?? []).map((t) => [t.name, t]));
     this.canUseTool = options.canUseTool ?? (async () => ({ behavior: "allow" }));
     this.session = options.session;
@@ -102,6 +115,12 @@ export class Agent {
 
   private async *loop(signal?: AbortSignal): AsyncGenerator<AgentEvent, void> {
     while (true) {
+      // Proactive compaction: the previous response's usage tells us roughly
+      // how big the next prompt is, for free — no count_tokens call.
+      if (this.autoCompact && this.lastPromptTokens > this.compactionThreshold) {
+        yield* this.maybeCompact(signal);
+      }
+
       const stream = this.client.messages.stream({
         model: this.model,
         max_tokens: this.maxTokens,
@@ -130,7 +149,19 @@ export class Agent {
       }
 
       const message = await stream.finalMessage();
+
+      // Reactive fallback: the request overflowed the context window. Don't
+      // record the (empty) response — compact and retry the same turn once.
+      // (Cast: this stop_reason isn't in the SDK's union yet.)
+      if ((message.stop_reason as string) === "model_context_window_exceeded") {
+        const compacted = yield* this.maybeCompact(signal);
+        if (compacted) continue;
+        yield { type: "done", stopReason: "model_context_window_exceeded" as StopReason };
+        return;
+      }
+
       this.pushMessage({ role: "assistant", content: message.content });
+      this.lastPromptTokens = promptTokens(message.usage);
       yield {
         type: "response_end",
         stopReason: message.stop_reason,
@@ -179,6 +210,74 @@ export class Agent {
         return;
       }
     }
+  }
+
+  /**
+   * Summarize the conversation and fold everything before the most recent
+   * real user turn into a single summary message, keeping that turn and
+   * whatever followed it verbatim. The tail must start at a real user turn
+   * (text content, not tool results) so tool_use/tool_result pairing is never
+   * severed. Returns null when there is nothing safe to fold (a single turn
+   * larger than the window — the accepted v1 limitation).
+   */
+  async compact(
+    signal?: AbortSignal,
+  ): Promise<{ summary: string; foldedMessages: number } | null> {
+    const cut = this.lastRealUserTurnIndex();
+    if (cut <= 0) return null;
+    const summary = await this.summarize(signal);
+    const tail = this.messages.slice(cut);
+    this.messages = [
+      { role: "user", content: `<compaction-summary>\n${summary}\n</compaction-summary>` },
+      ...tail,
+    ];
+    this.lastPromptTokens = 0;
+    this.session?.appendCompaction(this.messages, summary);
+    return { summary, foldedMessages: cut };
+  }
+
+  private async *maybeCompact(signal?: AbortSignal): AsyncGenerator<AgentEvent, boolean> {
+    if (this.lastRealUserTurnIndex() <= 0) return false;
+    yield { type: "compaction_start" };
+    const result = await this.compact(signal);
+    if (!result) return false;
+    yield { type: "compaction_end", summary: result.summary, foldedMessages: result.foldedMessages };
+    return true;
+  }
+
+  /** Index of the most recent user message that is a real turn, not tool results. */
+  private lastRealUserTurnIndex(): number {
+    for (let i = this.messages.length - 1; i >= 0; i--) {
+      const m = this.messages[i]!;
+      if (m.role !== "user") continue;
+      if (typeof m.content === "string") return i;
+      if (Array.isArray(m.content) && m.content.some((b) => b.type !== "tool_result")) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  private async summarize(signal?: AbortSignal): Promise<string> {
+    // Reuse the exact system prompt and tools so the history stays a cache
+    // read; append the instruction as a final user message. No thinking —
+    // this is a plain summarization.
+    const response = await this.client.messages.create(
+      {
+        model: this.model,
+        max_tokens: SUMMARY_MAX_TOKENS,
+        system: [{ type: "text", text: this.systemPrompt, cache_control: { type: "ephemeral" } }],
+        tools: this.toolDefinitions(),
+        messages: [...this.messages, { role: "user", content: COMPACTION_INSTRUCTION }],
+      },
+      { signal },
+    );
+    const text = response.content
+      .filter((b): b is Anthropic.TextBlock => b.type === "text")
+      .map((b) => b.text)
+      .join("\n")
+      .trim();
+    return text || "(summary unavailable)";
   }
 
   private async executeTool(
@@ -230,4 +329,14 @@ function truncate(output: string): string {
   if (output.length <= MAX_TOOL_OUTPUT_CHARS) return output;
   const dropped = output.length - MAX_TOOL_OUTPUT_CHARS;
   return `${output.slice(0, MAX_TOOL_OUTPUT_CHARS)}\n[output truncated: ${dropped} characters dropped]`;
+}
+
+/** Total tokens a response occupied — approximates the next prompt's size. */
+function promptTokens(usage: Anthropic.Usage): number {
+  return (
+    usage.input_tokens +
+    (usage.cache_read_input_tokens ?? 0) +
+    (usage.cache_creation_input_tokens ?? 0) +
+    usage.output_tokens
+  );
 }

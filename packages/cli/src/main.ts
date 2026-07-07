@@ -208,6 +208,15 @@ async function renderRun(
         totals.output += usage.output_tokens;
         break;
       }
+      case "compaction_start":
+        process.stdout.write(dim("\n[compacting context…]"));
+        mode = "idle";
+        break;
+      case "compaction_end":
+        process.stdout.write(
+          dim(` folded ${event.foldedMessages} messages into a summary\n`),
+        );
+        break;
       case "done":
         process.stdout.write("\n");
         if (event.stopReason === "interrupted") {
@@ -323,6 +332,21 @@ async function main() {
     const trimmed = input.trim();
     if (trimmed.length === 0) continue;
     if (trimmed === "exit" || trimmed === "quit") break;
+    if (trimmed === "/compact") {
+      process.stdout.write(dim("compacting…"));
+      try {
+        const result = await agent.compact();
+        process.stdout.write(
+          result
+            ? dim(` folded ${result.foldedMessages} messages\n\n`)
+            : dim(" nothing to compact\n\n"),
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(red(`\nerror: ${message}`));
+      }
+      continue;
+    }
 
     activeController = new AbortController();
     try {

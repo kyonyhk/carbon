@@ -54,4 +54,6 @@ export type AgentEvent =
   | { type: "tool_start"; id: string; name: string; input: unknown }
   | { type: "tool_result"; id: string; name: string; result: ToolResult }
   | { type: "response_end"; stopReason: StopReason; usage: Anthropic.Usage }
+  | { type: "compaction_start" }
+  | { type: "compaction_end"; summary: string; foldedMessages: number }
   | { type: "done"; stopReason: StopReason };
