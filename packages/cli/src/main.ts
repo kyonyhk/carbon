@@ -23,10 +23,11 @@ interface CliArgs {
   model: string;
   print?: string;
   memoryDir?: string;
+  noBanner: boolean;
 }
 
 function parseArgs(argv: string[]): CliArgs {
-  const args: CliArgs = { yolo: false, continue_: false, model: DEFAULT_MODEL };
+  const args: CliArgs = { yolo: false, continue_: false, model: DEFAULT_MODEL, noBanner: false };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     switch (arg) {
@@ -49,6 +50,11 @@ function parseArgs(argv: string[]): CliArgs {
       case "--memory":
         args.memoryDir = argv[++i];
         break;
+      case "--no-banner":
+        // Lets a wrapping mount (e.g. graphite) suppress carbon's wordmark
+        // and print its own. The info lines still print.
+        args.noBanner = true;
+        break;
       case "-h":
       case "--help":
         console.log(
@@ -58,7 +64,8 @@ function parseArgs(argv: string[]): CliArgs {
             `  -c, --continue        resume the most recent session\n` +
             `  -m, --model <id>      model to use (default ${DEFAULT_MODEL})\n` +
             `  -y, --yolo            skip tool permission prompts\n` +
-            `      --memory <dir>    mount a persistent memory directory\n`,
+            `      --memory <dir>    mount a persistent memory directory\n` +
+            `      --no-banner       suppress the wordmark (for wrapping mounts)\n`,
         );
         process.exit(0);
         break;
@@ -313,7 +320,10 @@ async function main() {
     canUseTool: hook,
   });
 
-  if ((process.stdout.columns ?? 80) >= 78) {
+  if (args.noBanner) {
+    // Wrapping mount owns the wordmark; just print the info line.
+    console.log(dim(`${args.model} · ${cwd}`));
+  } else if ((process.stdout.columns ?? 80) >= 78) {
     console.log("\n" + BANNER.join("\n") + "\n");
     console.log(dim(`${args.model} · ${cwd}`));
   } else {
