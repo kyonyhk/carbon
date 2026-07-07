@@ -26,6 +26,17 @@
         "@anthropic-ai/sdk": "^0.110.0",
       },
     },
+    "packages/server": {
+      "name": "@carbon/server",
+      "version": "0.1.0",
+      "bin": {
+        "carbon-server": "./src/main.ts",
+      },
+      "dependencies": {
+        "@anthropic-ai/sdk": "^0.110.0",
+        "@carbon/core": "workspace:*",
+      },
+    },
   },
   "packages": {
     "@anthropic-ai/sdk": ["@anthropic-ai/sdk@0.110.0", "", { "dependencies": { "json-schema-to-ts": "^3.1.1", "standardwebhooks": "^1.0.0" }, "peerDependencies": { "zod": "^3.25.0 || ^4.0.0" }, "optionalPeers": ["zod"], "bin": { "anthropic-ai-sdk": "bin/cli" } }, "sha512-hOP4bNYXDFHDxxiEgzlILXrxZIYCDnhe8sry0RDRKD/QnsEpvZcQpablCdm9X/WuD/YgOiSIkkqsL1mLLlTqJw=="],
@@ -35,6 +46,8 @@
     "@carbon/cli": ["@carbon/cli@workspace:packages/cli"],
 
     "@carbon/core": ["@carbon/core@workspace:packages/core"],
+
+    "@carbon/server": ["@carbon/server@workspace:packages/server"],
 
     "@stablelib/base64": ["@stablelib/base64@1.0.1", "", {}, "sha512-1bnPQqSxSuc3Ii6MhBysoWCg58j97aUjuCSZrGSmDxNqtytIi0k8utUenAwTZN4V5mXXYGsVUI9zeBqy+jBOSQ=="],
 

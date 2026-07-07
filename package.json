@@ -3,7 +3,7 @@
   "private": true,
   "workspaces": ["packages/*"],
   "scripts": {
-    "typecheck": "tsc --noEmit -p packages/core && tsc --noEmit -p packages/cli",
+    "typecheck": "tsc --noEmit -p packages/core && tsc --noEmit -p packages/cli && tsc --noEmit -p packages/server",
     "test": "bun test"
   },
   "devDependencies": {

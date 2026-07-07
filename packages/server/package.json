@@ -1,0 +1,12 @@
+{
+  "name": "@carbon/server",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "carbon-server": "./src/main.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.110.0",
+    "@carbon/core": "workspace:*"
+  }
+}

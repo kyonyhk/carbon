@@ -50,12 +50,14 @@ All tool results for one assistant turn are returned in a single user message.
 packages/
   core/          the harness — no I/O, no rendering
     src/
-      agent.ts     Agent: the loop, tool execution, permission hook
+      agent.ts     Agent: the loop, tool execution, permission hook, compaction
       types.ts     Tool, ToolResult, AgentEvent, CanUseTool
-      tools/       bash, read, write, edit
-      session.ts   JSONL transcript store
-      prompt.ts    default system prompt
+      tools/       bash, read, write, edit, task (subagents)
+      session.ts   JSONL transcript store (+ compaction records)
+      memory.ts    CARBON.md + memory-directory injection
+      prompt.ts    default system prompt + compaction instruction
   cli/           the first mount — readline REPL + print mode
+  server/        the second mount — HTTP + SSE, proves the core/mount boundary
 ```
 
 ## Permissions
@@ -133,12 +135,12 @@ Tools marked `readOnly: true` skip the hook entirely.
   - **v1 limitation (accepted):** a single turn whose tool results outgrow
     the window between checks errors rather than attempting mid-turn
     surgery.
-- **M5 — second mount, HTTP + SSE server (`@carbon/server`):** M5 is a test
-  with a pass/fail criterion: **the mount must be buildable with zero
-  changes to `@carbon/core`** — any core change it forces is a documented
-  API finding, not a workaround. Chosen over Slack/cron because it stresses
-  the boundary hardest and everything else (web UI, chat bridges,
-  Omaru-shaped clients) becomes a thin client of it later.
+- **M5 — second mount, HTTP + SSE server (`@carbon/server`) (done):** the
+  pass/fail criterion held — **built with zero changes to `@carbon/core`**
+  (the three-package typecheck confirms it; the live permission round-trip
+  proves it). Chosen over Slack/cron because it stresses the boundary
+  hardest and everything else (web UI, chat bridges, Omaru-shaped clients)
+  becomes a thin client of it later.
   - **Endpoints:** `POST /sessions {cwd, model, permissionMode}` → `{id}` ·
     `POST /sessions/:id/messages {text}` → SSE stream of that turn's
     AgentEvents · `POST /sessions/:id/permissions/:reqId {allow|deny}` ·
