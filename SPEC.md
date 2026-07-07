@@ -97,10 +97,61 @@ Tools marked `readOnly: true` skip the hook entirely.
   authority for these choices is graphite (see `~/Desktop/graphite-spec.md`)
   as first consumer; the API must also read sensibly for a chat-product mount
   and a cron mount (the "second consumer test") before it lands.
-- **M4 — context management:** token-threshold compaction (summarize the
-  transcript, restart with the summary) using the session file as source.
-- **M5 — second mount:** something non-terminal (Slack, cron, or HTTP) to
-  prove the core/mount boundary held.
+- **M4 — compaction:** client-side, in core. Server-side compaction (the
+  API beta) is rejected deliberately: it's provider-specific surface that
+  won't exist on Anthropic-compatible endpoints, it makes transcripts
+  non-self-describing, and it outsources a layer carbon exists to own.
+  The summarizer is a fresh no-tools `Agent` — the harness invoking itself.
+  - **Trigger:** the previous response's usage sum (`input + cache_read +
+    cache_creation + output`) approximates the next prompt size — no
+    `count_tokens` calls. When it crosses `AgentOptions.compactionThreshold`
+    (default 150k tokens), compact at the next safe boundary: start of
+    `run()`, or between loop iterations before the next API call.
+    Emergency fallback: on `model_context_window_exceeded`, compact and
+    retry once.
+  - **Mechanics:** summarize `messages[]` with a dedicated prompt (in
+    `prompt.ts`, overridable via `AgentOptions`) that must capture task
+    state, decisions, files touched and their relevant state, unresolved
+    threads, and user preferences. Summarizer uses the session's own model.
+    Rebuild history as: one user message containing the summary in
+    `<compaction-summary>` tags → verbatim tail → new input.
+  - **Cut boundary rule:** the verbatim tail starts at the most recent
+    *real* user turn (text content, not tool results) so tool_use/
+    tool_result pairing is never severed. Keep that last complete turn —
+    recency in exact form is worth its tokens.
+  - **Transcript honesty:** append `{type: "compaction", summary,
+    replacedThrough}` to the session JSONL; `Session.load()` reconstructs
+    post-compaction state so `--continue` works across compactions. The
+    file remains the full record; the line marks where the working set
+    folded.
+  - **Surface:** `compaction_start` / `compaction_end` AgentEvents (CLI
+    renders `[compacting…]`); public `agent.compact()` for manual use
+    (CLI `/compact` command).
+  - **v1 limitation (accepted):** a single turn whose tool results outgrow
+    the window between checks errors rather than attempting mid-turn
+    surgery.
+- **M5 — second mount, HTTP + SSE server (`@carbon/server`):** M5 is a test
+  with a pass/fail criterion: **the mount must be buildable with zero
+  changes to `@carbon/core`** — any core change it forces is a documented
+  API finding, not a workaround. Chosen over Slack/cron because it stresses
+  the boundary hardest and everything else (web UI, chat bridges,
+  Omaru-shaped clients) becomes a thin client of it later.
+  - **Endpoints:** `POST /sessions {cwd, model, permissionMode}` → `{id}` ·
+    `POST /sessions/:id/messages {text}` → SSE stream of that turn's
+    AgentEvents · `POST /sessions/:id/permissions/:reqId {allow|deny}` ·
+    `POST /sessions/:id/interrupt` · `GET /sessions` → list. Sessions are
+    JSONL-backed as always, so a server restart resumes.
+  - **Concurrency rule:** one `Agent` per session in a registry; a single
+    Agent's `run()` is never invoked concurrently (shared `messages[]`) —
+    the mount serializes per session (409 or queue). Core stays
+    instance-per-agent.
+  - **The boundary proof:** `canUseTool` is an async function the mount
+    owns — the server implementation emits a `permission_request` SSE
+    event and awaits the HTTP decision (timeout = deny). Working without
+    core changes is the point.
+  - **Interrupt:** per-session `AbortController`, same plumbing as Ctrl+C.
+  - **Auth (non-goal beyond this):** single bearer token from env, bind
+    localhost by default. Multi-user auth is explicitly out.
 
 ## Non-goals (for now)
 
