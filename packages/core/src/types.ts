@@ -6,6 +6,8 @@ export interface ToolContext {
   cwd: string;
   /** Aborted when the user interrupts the run; long-running tools should honor it. */
   signal?: AbortSignal;
+  /** The agent's memory directory, if one is mounted — lets consumers build memory-aware tools without re-plumbing paths. */
+  memoryDir?: string;
 }
 
 export interface ToolResult {

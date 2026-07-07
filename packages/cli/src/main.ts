@@ -22,6 +22,7 @@ interface CliArgs {
   continue_: boolean;
   model: string;
   print?: string;
+  memoryDir?: string;
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -45,6 +46,9 @@ function parseArgs(argv: string[]): CliArgs {
       case "--print":
         args.print = argv[++i];
         break;
+      case "--memory":
+        args.memoryDir = argv[++i];
+        break;
       case "-h":
       case "--help":
         console.log(
@@ -53,7 +57,8 @@ function parseArgs(argv: string[]): CliArgs {
             `  -p, --print <prompt>  run one prompt non-interactively and exit\n` +
             `  -c, --continue        resume the most recent session\n` +
             `  -m, --model <id>      model to use (default ${DEFAULT_MODEL})\n` +
-            `  -y, --yolo            skip tool permission prompts\n`,
+            `  -y, --yolo            skip tool permission prompts\n` +
+            `      --memory <dir>    mount a persistent memory directory\n`,
         );
         process.exit(0);
         break;
@@ -248,6 +253,7 @@ async function main() {
     const agent = new Agent({
       model: args.model,
       cwd,
+      memoryDir: args.memoryDir,
       tools: [...coreTools(), makeTaskTool({ model: args.model, cwd, hook, totals })],
       session,
       messages,
@@ -291,6 +297,7 @@ async function main() {
   const agent = new Agent({
     model: args.model,
     cwd,
+    memoryDir: args.memoryDir,
     tools: [...coreTools(), makeTaskTool({ model: args.model, cwd, hook, totals })],
     session,
     messages,

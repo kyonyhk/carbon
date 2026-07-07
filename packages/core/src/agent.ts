@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { buildMemorySection, loadProjectInstructions } from "./memory.ts";
 import { DEFAULT_SYSTEM_PROMPT } from "./prompt.ts";
 import type { Session } from "./session.ts";
 import type {
@@ -26,6 +27,10 @@ export interface AgentOptions {
   session?: Session;
   /** Resume from prior history (e.g. loaded from a session file). */
   messages?: Anthropic.MessageParam[];
+  /** Append CARBON.md project instructions from cwd (walking up to the repo root). Default true. */
+  projectInstructions?: boolean;
+  /** Persistent memory directory. If set, its MEMORY.md index is injected into the system prompt at session start. */
+  memoryDir?: string;
 }
 
 /**
@@ -44,6 +49,7 @@ export class Agent {
   readonly maxTokens: number;
   readonly tools: Map<string, Tool>;
   readonly session?: Session;
+  readonly memoryDir?: string;
   messages: Anthropic.MessageParam[];
 
   private canUseTool: CanUseTool;
@@ -51,8 +57,18 @@ export class Agent {
   constructor(options: AgentOptions = {}) {
     this.client = options.client ?? new Anthropic();
     this.model = options.model ?? DEFAULT_MODEL;
-    this.systemPrompt = options.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
     this.cwd = options.cwd ?? process.cwd();
+    this.memoryDir = options.memoryDir;
+    // System prompt = base + CARBON.md project instructions + memory index.
+    // Composed once at construction: it must stay byte-stable for the whole
+    // session or the prompt cache prefix breaks.
+    const parts = [options.systemPrompt ?? DEFAULT_SYSTEM_PROMPT];
+    if (options.projectInstructions !== false) {
+      const project = loadProjectInstructions(options.cwd ?? process.cwd());
+      if (project) parts.push(project);
+    }
+    if (this.memoryDir) parts.push(buildMemorySection(this.memoryDir));
+    this.systemPrompt = parts.join("\n\n");
     this.maxTokens = options.maxTokens ?? 64_000;
     this.tools = new Map((options.tools ?? []).map((t) => [t.name, t]));
     this.canUseTool = options.canUseTool ?? (async () => ({ behavior: "allow" }));
@@ -183,7 +199,7 @@ export class Agent {
         };
       }
     }
-    const ctx: ToolContext = { cwd: this.cwd, signal };
+    const ctx: ToolContext = { cwd: this.cwd, signal, memoryDir: this.memoryDir };
     try {
       const result = await tool.execute(input, ctx);
       return { ...result, output: truncate(result.output) };

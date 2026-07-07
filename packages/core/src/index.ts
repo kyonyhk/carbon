@@ -1,4 +1,5 @@
 export { Agent, DEFAULT_MODEL, type AgentOptions } from "./agent.ts";
+export { buildMemorySection, loadProjectInstructions } from "./memory.ts";
 export { DEFAULT_SYSTEM_PROMPT } from "./prompt.ts";
 export { Session, type SessionMeta } from "./session.ts";
 export {

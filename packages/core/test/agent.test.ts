@@ -290,3 +290,46 @@ describe("task tool (subagents)", () => {
     expect(result.isError).toBe(true);
   });
 });
+
+describe("memoryDir plumbing", () => {
+  test("tools receive memoryDir via ToolContext; subagents inherit it", async () => {
+    const seen: (string | undefined)[] = [];
+    const probe: Tool = {
+      name: "probe",
+      description: "records ctx.memoryDir",
+      inputSchema: { type: "object", properties: {} },
+      readOnly: true,
+      async execute(_input, ctx) {
+        seen.push(ctx.memoryDir);
+        return { output: "ok" };
+      },
+    };
+    const client = fakeClient([
+      message(
+        [{ type: "tool_use", caller: { type: "direct" }, id: "tu_1", name: "probe", input: {} }],
+        "tool_use",
+      ),
+      message([{ type: "text", text: "done", citations: null }], "end_turn"),
+    ]);
+    const memDir = mkdtempSync(join(tmpdir(), "carbon-mem-"));
+    const agent = new Agent({ client, tools: [probe], cwd: tmpdir(), memoryDir: memDir });
+    await collect(agent.run("go"));
+    expect(seen).toEqual([memDir]);
+
+    // Subagent inherits the parent's memoryDir through ctx.
+    const subClient = fakeClient([
+      message(
+        [{ type: "tool_use", caller: { type: "direct" }, id: "tu_s", name: "probe", input: {} }],
+        "tool_use",
+      ),
+      message([{ type: "text", text: "sub done", citations: null }], "end_turn"),
+    ]);
+    const task = createTaskTool({ client: subClient, tools: [probe] });
+    const result = await task.execute(
+      { description: "probe memory", prompt: "probe" },
+      { cwd: tmpdir(), memoryDir: memDir },
+    );
+    expect(result.output).toBe("sub done");
+    expect(seen).toEqual([memDir, memDir]);
+  });
+});

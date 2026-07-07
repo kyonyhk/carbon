@@ -20,6 +20,8 @@ export interface TaskToolOptions {
   canUseTool?: CanUseTool;
   systemPrompt?: string;
   maxTokens?: number;
+  /** Memory directory for subagents. Defaults to the spawning agent's own. */
+  memoryDir?: string;
   /** Observe subagent events, e.g. to render nested activity in a mount. */
   onEvent?: (event: AgentEvent, task: { description: string }) => void;
 }
@@ -74,6 +76,8 @@ export function createTaskTool(options: TaskToolOptions = {}): Tool<TaskInput> {
         client: options.client,
         model: options.model,
         cwd: options.cwd ?? ctx.cwd,
+        // Subagents share the parent's memory unless the factory overrides it.
+        memoryDir: options.memoryDir ?? ctx.memoryDir,
         maxTokens: options.maxTokens,
         tools: options.tools ?? [bashTool, readTool, writeTool, editTool],
         canUseTool: options.canUseTool,

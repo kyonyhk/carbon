@@ -29,11 +29,20 @@ bun run packages/cli/src/main.ts -c
 
 # skip permission prompts
 bun run packages/cli/src/main.ts -y
+
+# mount a persistent memory directory
+bun run packages/cli/src/main.ts --memory ~/.carbon-memory
 ```
 
 Ctrl+C during a run interrupts the current turn (the conversation stays usable);
 Ctrl+C at the idle prompt exits. Sessions are append-only JSONL, so `carbon -c`
 always resumes exactly where you were.
+
+If a `CARBON.md` exists in the working directory (or between it and the repo
+root), its contents are appended to the system prompt as project instructions —
+nearest file wins. With `--memory <dir>`, the directory's `MEMORY.md` index is
+injected at session start and the agent reads/writes memory files with its
+ordinary file tools; what to store and when is up to the agent and you.
 
 ## Install globally
 
