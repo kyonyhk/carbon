@@ -69,6 +69,27 @@ Ctrl+C during a run interrupts the current turn and leaves the conversation
 usable; at the idle prompt it exits. Sessions are append-only JSONL, so
 `carbon -c` always resumes exactly where you were.
 
+## Other providers
+
+carbon targets the Anthropic Messages API, so it also runs against any
+Anthropic-compatible endpoint. Point it at one with `ANTHROPIC_BASE_URL` and the
+matching key, then pick the model. This is how you run it on a cheaper model
+than Opus. Example with Kimi (Moonshot):
+
+```sh
+export ANTHROPIC_BASE_URL=https://api.moonshot.ai/anthropic
+export ANTHROPIC_API_KEY=<your moonshot key>
+export CARBON_MODEL=kimi-k2.7-code
+export CARBON_NO_THINKING=1   # this model doesn't accept the thinking param
+carbon
+```
+
+`CARBON_MODEL`, `CARBON_NO_THINKING`, and `CARBON_NO_CACHE` set the defaults once
+so you don't retype flags. Per-run, the same knobs are `-m <model>`,
+`--no-thinking`, and `--no-cache`. Use `--no-thinking` for any endpoint or model
+that rejects the thinking parameter, and `--no-cache` for one that rejects
+`cache_control` markers.
+
 ## Memory
 
 carbon takes the filesystem-memory position over retrieval-augmented

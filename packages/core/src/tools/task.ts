@@ -22,6 +22,10 @@ export interface TaskToolOptions {
   maxTokens?: number;
   /** Memory directory for subagents. Defaults to the spawning agent's own. */
   memoryDir?: string;
+  /** Thinking config for subagents (pass null to disable, e.g. for Kimi code models). */
+  thinking?: Anthropic.ThinkingConfigParam | null;
+  /** Send cache_control markers for subagents. */
+  cacheControl?: boolean;
   /** Observe subagent events, e.g. to render nested activity in a mount. */
   onEvent?: (event: AgentEvent, task: { description: string }) => void;
 }
@@ -79,6 +83,8 @@ export function createTaskTool(options: TaskToolOptions = {}): Tool<TaskInput> {
         // Subagents share the parent's memory unless the factory overrides it.
         memoryDir: options.memoryDir ?? ctx.memoryDir,
         maxTokens: options.maxTokens,
+        ...(options.thinking !== undefined ? { thinking: options.thinking } : {}),
+        ...(options.cacheControl !== undefined ? { cacheControl: options.cacheControl } : {}),
         tools: options.tools ?? [bashTool, readTool, writeTool, editTool],
         canUseTool: options.canUseTool,
         systemPrompt: (options.systemPrompt ?? DEFAULT_SYSTEM_PROMPT) + SUBAGENT_SUFFIX,

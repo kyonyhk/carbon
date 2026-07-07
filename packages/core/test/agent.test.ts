@@ -333,3 +333,50 @@ describe("memoryDir plumbing", () => {
     expect(seen).toEqual([memDir, memDir]);
   });
 });
+
+describe("provider config (thinking / cache opt-out)", () => {
+  // Capture the params passed to messages.stream so we can assert on them.
+  function capturingClient(captured: any[]): Anthropic {
+    return {
+      messages: {
+        stream(params: any) {
+          captured.push(params);
+          return {
+            async *[Symbol.asyncIterator]() {},
+            async finalMessage() {
+              return message([{ type: "text", text: "ok", citations: null }], "end_turn");
+            },
+          };
+        },
+      },
+    } as unknown as Anthropic;
+  }
+
+  test("default sends adaptive thinking and cache_control", async () => {
+    const captured: any[] = [];
+    const agent = new Agent({ client: capturingClient(captured), cwd: tmpdir() });
+    await collect(agent.run("hi"));
+    expect(captured[0].thinking).toEqual({ type: "adaptive", display: "summarized" });
+    expect(captured[0].cache_control).toEqual({ type: "ephemeral" });
+    expect(captured[0].system[0].cache_control).toEqual({ type: "ephemeral" });
+  });
+
+  test("thinking:null omits the param entirely (Kimi code models)", async () => {
+    const captured: any[] = [];
+    const agent = new Agent({ client: capturingClient(captured), cwd: tmpdir(), thinking: null });
+    await collect(agent.run("hi"));
+    expect("thinking" in captured[0]).toBe(false);
+  });
+
+  test("cacheControl:false omits all cache_control markers", async () => {
+    const captured: any[] = [];
+    const agent = new Agent({
+      client: capturingClient(captured),
+      cwd: tmpdir(),
+      cacheControl: false,
+    });
+    await collect(agent.run("hi"));
+    expect("cache_control" in captured[0]).toBe(false);
+    expect("cache_control" in captured[0].system[0]).toBe(false);
+  });
+});

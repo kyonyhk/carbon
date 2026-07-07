@@ -38,6 +38,17 @@ export interface AgentOptions {
   compactionThreshold?: number;
   /** Automatically compact when the threshold is crossed. Default true. */
   autoCompact?: boolean;
+  /**
+   * Thinking config sent on every request. Defaults to adaptive/summarized.
+   * Pass `null` to omit it entirely — required for Anthropic-compatible
+   * endpoints whose model doesn't accept the param (e.g. kimi-k2.7-code).
+   */
+  thinking?: Anthropic.ThinkingConfigParam | null;
+  /**
+   * Send `cache_control` prompt-caching markers. Default true. Turn off for
+   * endpoints that reject the field.
+   */
+  cacheControl?: boolean;
 }
 
 /**
@@ -59,6 +70,8 @@ export class Agent {
   readonly memoryDir?: string;
   readonly compactionThreshold: number;
   readonly autoCompact: boolean;
+  readonly thinking: Anthropic.ThinkingConfigParam | null;
+  readonly cacheControl: boolean;
   messages: Anthropic.MessageParam[];
 
   /** Estimated size of the next prompt, from the previous response's usage. */
@@ -83,6 +96,9 @@ export class Agent {
     this.maxTokens = options.maxTokens ?? 64_000;
     this.compactionThreshold = options.compactionThreshold ?? DEFAULT_COMPACTION_THRESHOLD;
     this.autoCompact = options.autoCompact ?? true;
+    this.thinking =
+      options.thinking === undefined ? { type: "adaptive", display: "summarized" } : options.thinking;
+    this.cacheControl = options.cacheControl ?? true;
     this.tools = new Map((options.tools ?? []).map((t) => [t.name, t]));
     this.canUseTool = options.canUseTool ?? (async () => ({ behavior: "allow" }));
     this.session = options.session;
@@ -121,23 +137,20 @@ export class Agent {
         yield* this.maybeCompact(signal);
       }
 
-      const stream = this.client.messages.stream({
-        model: this.model,
-        max_tokens: this.maxTokens,
-        thinking: { type: "adaptive", display: "summarized" },
-        // Breakpoint on the system block caches tools + system; the top-level
-        // marker auto-caches the growing conversation prefix each turn.
-        cache_control: { type: "ephemeral" },
-        system: [
-          {
-            type: "text",
-            text: this.systemPrompt,
-            cache_control: { type: "ephemeral" },
-          },
-        ],
-        tools: this.toolDefinitions(),
-        messages: this.messages,
-      }, { signal });
+      const stream = this.client.messages.stream(
+        {
+          model: this.model,
+          max_tokens: this.maxTokens,
+          ...(this.thinking ? { thinking: this.thinking } : {}),
+          // Breakpoint on the system block caches tools + system; the top-level
+          // marker auto-caches the growing conversation prefix each turn.
+          ...(this.cacheControl ? { cache_control: { type: "ephemeral" as const } } : {}),
+          system: this.systemBlocks(),
+          tools: this.toolDefinitions(),
+          messages: this.messages,
+        },
+        { signal },
+      );
 
       for await (const event of stream) {
         if (event.type !== "content_block_delta") continue;
@@ -266,7 +279,7 @@ export class Agent {
       {
         model: this.model,
         max_tokens: SUMMARY_MAX_TOKENS,
-        system: [{ type: "text", text: this.systemPrompt, cache_control: { type: "ephemeral" } }],
+        system: this.systemBlocks(),
         tools: this.toolDefinitions(),
         messages: [...this.messages, { role: "user", content: COMPACTION_INSTRUCTION }],
       },
@@ -314,6 +327,16 @@ export class Agent {
   private pushMessage(message: Anthropic.MessageParam): void {
     this.messages.push(message);
     this.session?.append(message);
+  }
+
+  private systemBlocks(): Anthropic.TextBlockParam[] {
+    return [
+      {
+        type: "text",
+        text: this.systemPrompt,
+        ...(this.cacheControl ? { cache_control: { type: "ephemeral" as const } } : {}),
+      },
+    ];
   }
 
   private toolDefinitions(): Anthropic.Tool[] {

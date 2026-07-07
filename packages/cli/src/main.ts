@@ -7,6 +7,7 @@ import {
   DEFAULT_MODEL,
   Session,
   type AgentEvent,
+  type AgentOptions,
   type CanUseTool,
   type Tool,
 } from "@carbon/core";
@@ -24,10 +25,22 @@ interface CliArgs {
   print?: string;
   memoryDir?: string;
   noBanner: boolean;
+  noThinking: boolean;
+  noCache: boolean;
 }
 
 function parseArgs(argv: string[]): CliArgs {
-  const args: CliArgs = { yolo: false, continue_: false, model: DEFAULT_MODEL, noBanner: false };
+  // Env defaults let you point carbon at a cheaper endpoint once instead of
+  // passing flags every run: set ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY,
+  // CARBON_MODEL, and CARBON_NO_THINKING=1 (for Kimi code models).
+  const args: CliArgs = {
+    yolo: false,
+    continue_: false,
+    model: process.env.CARBON_MODEL ?? DEFAULT_MODEL,
+    noBanner: false,
+    noThinking: process.env.CARBON_NO_THINKING === "1",
+    noCache: process.env.CARBON_NO_CACHE === "1",
+  };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     switch (arg) {
@@ -55,6 +68,15 @@ function parseArgs(argv: string[]): CliArgs {
         // and print its own. The info lines still print.
         args.noBanner = true;
         break;
+      case "--no-thinking":
+        // Omit the thinking param — needed for Anthropic-compatible endpoints
+        // whose model rejects it (e.g. Kimi's kimi-k2.7-code).
+        args.noThinking = true;
+        break;
+      case "--no-cache":
+        // Omit cache_control markers, for endpoints that reject them.
+        args.noCache = true;
+        break;
       case "-h":
       case "--help":
         console.log(
@@ -65,7 +87,11 @@ function parseArgs(argv: string[]): CliArgs {
             `  -m, --model <id>      model to use (default ${DEFAULT_MODEL})\n` +
             `  -y, --yolo            skip tool permission prompts\n` +
             `      --memory <dir>    mount a persistent memory directory\n` +
-            `      --no-banner       suppress the wordmark (for wrapping mounts)\n`,
+            `      --no-thinking     omit the thinking param (e.g. for Kimi code models)\n` +
+            `      --no-cache        omit prompt-cache markers\n` +
+            `      --no-banner       suppress the wordmark (for wrapping mounts)\n\n` +
+            `To use a non-Anthropic endpoint (e.g. Kimi), set ANTHROPIC_BASE_URL\n` +
+            `and ANTHROPIC_API_KEY, then pass -m <model> (and --no-thinking if needed).\n`,
         );
         process.exit(0);
         break;
@@ -97,11 +123,15 @@ function makeTaskTool(options: {
   cwd: string;
   hook: CanUseTool;
   totals: Totals;
+  thinking: AgentOptions["thinking"];
+  cacheControl: boolean;
 }): Tool {
   return createTaskTool({
     model: options.model,
     cwd: options.cwd,
     canUseTool: options.hook,
+    thinking: options.thinking,
+    cacheControl: options.cacheControl,
     onEvent: (event, task) => {
       if (event.type === "tool_start") {
         const preview = toolPreview(event.name, event.input);
@@ -245,6 +275,10 @@ async function main() {
   }
   const cwd = process.cwd();
   const alwaysAllowed = new Set<string>();
+  // Provider settings: undefined thinking means the core default (adaptive);
+  // null disables it for endpoints/models that reject the param.
+  const thinking: AgentOptions["thinking"] = args.noThinking ? null : undefined;
+  const cacheControl = !args.noCache;
 
   let session: Session;
   let messages: Anthropic.MessageParam[] = [];
@@ -269,7 +303,12 @@ async function main() {
       model: args.model,
       cwd,
       memoryDir: args.memoryDir,
-      tools: [...coreTools(), makeTaskTool({ model: args.model, cwd, hook, totals })],
+      thinking,
+      cacheControl,
+      tools: [
+        ...coreTools(),
+        makeTaskTool({ model: args.model, cwd, hook, totals, thinking, cacheControl }),
+      ],
       session,
       messages,
       canUseTool: hook,
@@ -313,7 +352,12 @@ async function main() {
     model: args.model,
     cwd,
     memoryDir: args.memoryDir,
-    tools: [...coreTools(), makeTaskTool({ model: args.model, cwd, hook, totals })],
+    thinking,
+    cacheControl,
+    tools: [
+      ...coreTools(),
+      makeTaskTool({ model: args.model, cwd, hook, totals, thinking, cacheControl }),
+    ],
     session,
     messages,
     canUseTool: hook,
