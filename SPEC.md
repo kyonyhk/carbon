@@ -78,10 +78,25 @@ Tools marked `readOnly: true` skip the hook entirely.
   observe subagent activity via an `onEvent` callback. Subagent turns are not
   yet written to their own session files, and parallel `task` calls in one
   batch still execute sequentially — both revisit later.
-- **M3 — memory:** filesystem memory directory injected into the system
-  prompt; a CARBON.md project-instructions file loaded from cwd.
-  Co-design with graphite (the self-improvement experiment repo that mounts
-  carbon): memory files are graphite's primary mutation surface.
+- **M3 — memory (next):** the *mechanism* for persistent context, with zero
+  policy. Three pieces, all in core:
+  1. **Project instructions:** if a `CARBON.md` exists in cwd, append its
+     contents to the system prompt. (Also walk up to the repo root, nearest
+     file wins; both loaded if nested.)
+  2. **Memory mount:** `AgentOptions.memoryDir?: string` — if set, inject the
+     directory's index file (`MEMORY.md`) into the system prompt at session
+     start, plus a short instruction telling the model the directory exists
+     and is readable/writable with the ordinary file tools. Carbon does not
+     define the file format, when to write, or what to store.
+  3. **Tool awareness:** `ToolContext.memoryDir?: string` so consumers can
+     build memory-specific tools without re-plumbing paths.
+
+  Explicitly out of core (consumer policy): what counts as memorable, file
+  format/frontmatter conventions, reflection/consolidation/decay, whether
+  injection is index-only or content, embeddings or search. The design
+  authority for these choices is graphite (see `~/Desktop/graphite-spec.md`)
+  as first consumer; the API must also read sensibly for a chat-product mount
+  and a cron mount (the "second consumer test") before it lands.
 - **M4 — context management:** token-threshold compaction (summarize the
   transcript, restart with the summary) using the session file as source.
 - **M5 — second mount:** something non-terminal (Slack, cron, or HTTP) to
