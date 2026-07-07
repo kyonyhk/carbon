@@ -99,7 +99,8 @@ Tools marked `readOnly: true` skip the hook entirely.
   CLI exposes `--memory <dir>` (opt-in — memory-by-default is a consumer
   policy, e.g. graphite's). Explicitly out of core: what counts as
   memorable, file formats, reflection/consolidation/decay, embeddings or
-  search — see `~/Desktop/graphite-spec.md`, the first consumer.
+  search. graphite (a self-improving agent built on carbon) is the first
+  consumer and design authority for those choices.
 - **M4 — compaction (done):** client-side, in core. Server-side compaction (the
   API beta) is rejected deliberately: it's provider-specific surface that
   won't exist on Anthropic-compatible endpoints, it makes transcripts

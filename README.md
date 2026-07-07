@@ -2,66 +2,87 @@
 
 # carbon
 
-A minimal agent harness. The structural spine — a headless agent loop, four
-tools, and file-based sessions — that future agents get built on.
+A minimal agent harness: a headless agent loop, four tools, and file-based
+sessions. The foundation you build other agents on.
 
-See [SPEC.md](./SPEC.md) for the architecture and roadmap.
+## Why this exists
 
-## Setup
+Every useful agent starts as a coding agent. Bash plus a filesystem is the
+universal tool, so anything an agent needs to do reduces to reading files,
+writing files, and running commands. Build that foundation once, understand
+every layer of it, and future agents become mounts on top of it rather than
+fresh rewrites.
+
+carbon is that foundation, and it is small on purpose. The interesting
+decisions are not in the loop (the loop is a few hundred lines). They are in
+the boundaries:
+
+- **Headless core.** `@carbon/core` never touches stdin or stdout. The `Agent`
+  yields a stream of typed events; a *mount* (a terminal REPL, an HTTP server,
+  a cron job) consumes them and owns all I/O, including how it asks the user to
+  approve a tool call. A new agent is a new mount, not a fork of the loop.
+- **Tools are data, not a plugin system.** A tool is a name, a description, an
+  input schema, and a function. You pass tools to the agent as plain values.
+  Extension is an import, not a registry.
+- **Transcripts are files.** Every session is append-only JSONL on disk. Cheap
+  to write, trivial to replay, and the raw material for memory and compaction.
+- **Mechanism, not policy.** The core enforces *that* a risky tool needs
+  approval and *that* memory can be mounted. It has no opinion on *how* you
+  approve or *what* you store. Those are the consumer's decisions.
+
+The throughline is that the opinions are the product. carbon exists so that
+every agent decision (context, memory, tools, permissions, visibility) is a
+first-class design choice instead of a workaround.
+
+## What's in it
+
+- **`@carbon/core`** the harness. The agent loop, the four tools (bash, read,
+  write, edit), a subagent tool, JSONL sessions, memory loading, and
+  client-side compaction. No I/O, no rendering.
+- **`@carbon/cli`** the first mount. A terminal REPL with streamed output,
+  tool-permission prompts, interrupt handling, and session resume.
+- **`@carbon/server`** a second mount. An HTTP + SSE server, built to prove the
+  core boundary holds. It required zero changes to the core.
+
+Full architecture and the milestone history are in [SPEC.md](./SPEC.md).
+
+## Quickstart
+
+Needs [Bun](https://bun.sh). Auth resolves the same way the Anthropic SDK does:
+set `ANTHROPIC_API_KEY`, or log in with a profile.
 
 ```sh
 bun install
+cd packages/cli && bun link   # puts `carbon` on your PATH
 ```
 
-Auth is the Anthropic SDK default: set `ANTHROPIC_API_KEY` in your environment.
-
-## Use
+Then run it inside any project folder:
 
 ```sh
-# interactive REPL in the current directory
-bun run packages/cli/src/main.ts
-
-# one-shot, non-interactive
-bun run packages/cli/src/main.ts -p "what does this repo do?"
-
-# resume the latest session
-bun run packages/cli/src/main.ts -c
-
-# skip permission prompts
-bun run packages/cli/src/main.ts -y
-
-# mount a persistent memory directory
-bun run packages/cli/src/main.ts --memory ~/.carbon-memory
+carbon                         # interactive session in the current directory
+carbon -p "what does this repo do?"   # one-shot
+carbon -c                      # resume the most recent session
+carbon --memory ~/.carbon-memory      # mount a persistent memory directory
 ```
 
-Ctrl+C during a run interrupts the current turn (the conversation stays usable);
-Ctrl+C at the idle prompt exits. Sessions are append-only JSONL, so `carbon -c`
-always resumes exactly where you were.
+Ctrl+C during a run interrupts the current turn and leaves the conversation
+usable; at the idle prompt it exits. Sessions are append-only JSONL, so
+`carbon -c` always resumes exactly where you were.
 
-If a `CARBON.md` exists in the working directory (or between it and the repo
-root), its contents are appended to the system prompt as project instructions —
-nearest file wins. With `--memory <dir>`, the directory's `MEMORY.md` index is
-injected at session start and the agent reads/writes memory files with its
-ordinary file tools; what to store and when is up to the agent and you.
+## Memory
 
-## Install globally
-
-```sh
-cd packages/cli && bun link
-```
-
-This puts a `carbon` command on your PATH (via `~/.bun/bin`) that runs the live
-source — like `claude`, you run it inside any project folder and it operates on
-that folder. Edits to this repo take effect immediately, no reinstall needed.
-
-## Develop
-
-```sh
-bun run typecheck
-bun test
-```
+carbon takes the filesystem-memory position over retrieval-augmented
+generation. If a `CARBON.md` exists in the working directory (or anywhere up to
+the repo root), its contents are appended to the system prompt as project
+instructions. With `--memory <dir>`, the directory's `MEMORY.md` index is
+injected at session start and the agent reads and writes memory files with its
+ordinary file tools. Memory is grepped and read, not embedded and searched.
+What to store and when is the consumer's policy, not the harness's.
 
 ## Build on it
+
+The core is a library. A new agent is a new mount that consumes `AgentEvent`s
+and supplies its own tools and permission hook.
 
 ```ts
 import { Agent, coreTools } from "@carbon/core";
@@ -72,5 +93,21 @@ for await (const event of agent.run("fix the failing test")) {
 }
 ```
 
-The core is headless — a new agent is a new *mount* that consumes `AgentEvent`s
-and supplies its own tools and permission hook.
+## Develop
+
+```sh
+bun run typecheck
+bun test
+```
+
+## How this was built
+
+carbon was designed and directed by me and implemented in close collaboration
+with Claude Code. The architecture, the boundaries described above, and the
+design decisions are mine; much of the implementation was written by an agent
+under that direction, which the commit trailers reflect honestly. Building an
+agent harness by directing an agent seemed like the right way to build one.
+
+## License
+
+MIT. See [LICENSE](./LICENSE).
