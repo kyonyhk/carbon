@@ -158,8 +158,44 @@ Tools marked `readOnly: true` skip the hook entirely.
   - **Interrupt:** per-session `AbortController`, same plumbing as Ctrl+C.
   - **Auth (non-goal beyond this):** single bearer token from env, bind
     localhost by default. Multi-user auth is explicitly out.
+- **M6 — orchestration (done):** the model as the orchestrator — the
+  primitives for bounded, observable, replayable fan-out, with what/when/how
+  left to consumers. Full design rationale in
+  [ORCHESTRATION.md](./ORCHESTRATION.md). Six pieces:
+  1. **Event tree:** `ToolContext.emit` lets any tool stream events into the
+     running agent's own stream (an internal channel the loop drains while
+     tool batches execute); subagent activity arrives as `subagent_event`
+     wrapping a raw leaf event with the spawn chain in `path` — flat, never
+     nested. Replaces the M2 `onEvent` side channel. Mounts that ignore the
+     type behave as before; the server mount needed zero changes, again.
+  2. **Parallel tool batches:** all calls in one assistant turn start
+     concurrently, capped by `AgentOptions.maxConcurrentTools` (default 8);
+     results append in tool_use order so transcripts stay deterministic.
+     (Removes the parallel-execution non-goal. The CLI serializes its
+     permission prompts; core needed nothing.)
+  3. **Structured output:** the spawner model may pass `schema` in the task
+     input; the subagent gets a `structured_output` tool whose input schema
+     *is* that schema — validation rides on the API's server-side
+     enforcement. Finishing without calling it is an error the orchestrator
+     can react to. `model` override rides along for cheap grunt work.
+  4. **Subagent sessions:** every spawn writes a real session file;
+     `SessionMeta.parent` records the spawn edge, and the task result's
+     first line (`[session: <id>]`) makes it walkable from the parent
+     transcript. Raw material for replay, debugging, and graphite's
+     reflection over whole orchestrations.
+  5. **Budgets replace the one-level rule:** `maxDepth` (default 2),
+     `maxSpawns` (default 32), `maxSpawnTokens` (off) — one shared budget
+     across the spawn tree; exhaustion fails fast with a message the
+     orchestrator sees. M2's hard rule was policy hiding in mechanism.
+  6. **Kill handle:** `onSpawn` hands the mount an `abort()` per task —
+     kill one subagent without nuking the run (parent interrupt still
+     cascades via joined signals).
+
+  Explicitly deferred: background spawns (the event model is shaped so they
+  can land later without breaking mounts), deterministic orchestration
+  scripts, subagent continuation, worktree isolation.
 
 ## Non-goals (for now)
 
 Multi-provider abstraction, plugin/config systems, TUI polish, sandboxing
-beyond permission prompts, parallel tool execution.
+beyond permission prompts.

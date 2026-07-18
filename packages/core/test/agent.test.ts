@@ -1,6 +1,6 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "../src/agent.ts";
@@ -195,7 +195,8 @@ describe("interrupt", () => {
       },
     };
     // Only one scripted message: if the loop tried a second API call after
-    // the abort, the fake client would throw.
+    // the abort, the fake client would throw. maxConcurrentTools: 1 keeps the
+    // second call unstarted at abort time, which is what this test exercises.
     const client = fakeClient([
       message(
         [
@@ -205,7 +206,12 @@ describe("interrupt", () => {
         "tool_use",
       ),
     ]);
-    const agent = new Agent({ client, tools: [abortingTool], cwd: tmpdir() });
+    const agent = new Agent({
+      client,
+      tools: [abortingTool],
+      cwd: tmpdir(),
+      maxConcurrentTools: 1,
+    });
     const events = await collect(agent.run("go", { signal: controller.signal }));
 
     // Second tool never started; run ended as interrupted.
@@ -221,28 +227,84 @@ describe("interrupt", () => {
   });
 });
 
-describe("task tool (subagents)", () => {
+describe("parallel tool execution", () => {
+  test("calls in one batch run concurrently; results stay in tool_use order", async () => {
+    const completed: string[] = [];
+    const timed: Tool<{ id: string; delay: number }> = {
+      name: "timed",
+      description: "sleeps then returns",
+      inputSchema: { type: "object", properties: {} },
+      readOnly: true,
+      async execute(input) {
+        await new Promise((r) => setTimeout(r, input.delay));
+        completed.push(input.id);
+        return { output: input.id };
+      },
+    };
+    const client = fakeClient([
+      message(
+        [
+          { type: "tool_use", caller: { type: "direct" }, id: "tu_a", name: "timed", input: { id: "slow", delay: 50 } },
+          { type: "tool_use", caller: { type: "direct" }, id: "tu_b", name: "timed", input: { id: "fast", delay: 0 } },
+        ],
+        "tool_use",
+      ),
+      message([{ type: "text", text: "done", citations: null }], "end_turn"),
+    ]);
+    const agent = new Agent({ client, tools: [timed], cwd: tmpdir() });
+    await collect(agent.run("go"));
 
+    // The fast call finished first — proof they overlapped.
+    expect(completed).toEqual(["fast", "slow"]);
+    // But the results message preserves tool_use order.
+    const resultsMsg = agent.messages[2]!;
+    const blocks = resultsMsg.content as Anthropic.ToolResultBlockParam[];
+    expect(blocks.map((b) => b.tool_use_id)).toEqual(["tu_a", "tu_b"]);
+    expect(blocks.map((b) => b.content)).toEqual(["slow", "fast"]);
+  });
+
+  test("events a tool emits via ctx.emit surface in the run's stream", async () => {
+    const emitting: Tool = {
+      name: "emitting",
+      description: "emits a progress event",
+      inputSchema: { type: "object", properties: {} },
+      readOnly: true,
+      async execute(_input, ctx) {
+        ctx.emit?.({ type: "text", text: "progress!" });
+        return { output: "ok" };
+      },
+    };
+    const client = fakeClient([
+      message(
+        [{ type: "tool_use", caller: { type: "direct" }, id: "tu_1", name: "emitting", input: {} }],
+        "tool_use",
+      ),
+      message([{ type: "text", text: "done", citations: null }], "end_turn"),
+    ]);
+    const agent = new Agent({ client, tools: [emitting], cwd: tmpdir() });
+    const events = await collect(agent.run("go"));
+    const types = events.map((e) => e.type);
+    // The emitted event lands between tool_start and tool_result.
+    expect(types.indexOf("text")).toBeGreaterThan(types.indexOf("tool_start"));
+    expect(types.indexOf("text")).toBeLessThan(types.indexOf("tool_result"));
+  });
+});
+
+describe("task tool (subagents)", () => {
   test("runs a subagent and returns its final text", async () => {
     const subClient = fakeClient([
       message([{ type: "text", text: "subagent report: 42 files found", citations: null }], "end_turn"),
     ]);
-    const seen: string[] = [];
-    const task = createTaskTool({
-      client: subClient,
-      onEvent: (event, t) => seen.push(`${t.description}:${event.type}`),
-    });
+    const task = createTaskTool({ client: subClient, sessionDir: false });
     const result = await task.execute(
       { description: "count files", prompt: "count the files" },
       { cwd: tmpdir() },
     );
     expect(result.isError).toBeUndefined();
     expect(result.output).toBe("subagent report: 42 files found");
-    expect(seen).toContain("count files:text");
-    expect(seen).toContain("count files:done");
   });
 
-  test("parent agent round-trips through a subagent", async () => {
+  test("subagent activity streams into the parent as subagent_events", async () => {
     const subClient = fakeClient([
       message([{ type: "text", text: "the answer is blue", citations: null }], "end_turn"),
     ]);
@@ -258,20 +320,67 @@ describe("task tool (subagents)", () => {
     ]);
     const parent = new Agent({
       client: parentClient,
-      tools: [createTaskTool({ client: subClient })],
+      tools: [createTaskTool({ client: subClient, sessionDir: false })],
       cwd: tmpdir(),
     });
     const events = await collect(parent.run("go"));
+
     const toolResult = events.find((e) => e.type === "tool_result");
     expect(toolResult && toolResult.type === "tool_result" ? toolResult.result.output : "").toBe(
       "the answer is blue",
     );
+
+    const wrapped = events.filter((e) => e.type === "subagent_event");
+    expect(wrapped.length).toBeGreaterThan(0);
+    for (const w of wrapped) {
+      if (w.type !== "subagent_event") continue;
+      expect(w.path).toHaveLength(1);
+      expect(w.path[0]!.taskId).toBe("tu_task");
+      expect(w.path[0]!.description).toBe("find the answer");
+      // Flattening invariant: the wrapped event is never itself a wrapper.
+      expect(w.event.type).not.toBe("subagent_event");
+    }
+    const wrappedTypes = wrapped.map((w) => (w.type === "subagent_event" ? w.event.type : ""));
+    expect(wrappedTypes).toContain("text");
+    expect(wrappedTypes).toContain("done");
   });
 
-  test("subagent toolset excludes the task tool by default", () => {
-    const task = createTaskTool({});
-    // The description promises no recursion; the default tools must match.
-    expect(task.description).toContain("cannot spawn further subagents");
+  test("grandchild events arrive flat with a two-hop path", async () => {
+    // One shared script serves child then grandchild then child again —
+    // execution is sequential across the spawn chain.
+    const subClient = fakeClient([
+      message(
+        [{
+          type: "tool_use", caller: { type: "direct" }, id: "tu_gc", name: "task",
+          input: { description: "grandchild job", prompt: "dig deeper" },
+        }],
+        "tool_use",
+      ),
+      message([{ type: "text", text: "gc-report", citations: null }], "end_turn"),
+      message([{ type: "text", text: "child-report", citations: null }], "end_turn"),
+    ]);
+    const emitted: AgentEvent[] = [];
+    const task = createTaskTool({ client: subClient, sessionDir: false });
+    const result = await task.execute(
+      { description: "child job", prompt: "delegate" },
+      { cwd: tmpdir(), toolUseId: "tu_child", emit: (e) => emitted.push(e) },
+    );
+    expect(result.output).toBe("child-report");
+
+    const deep = emitted.filter(
+      (e) => e.type === "subagent_event" && e.path.length === 2,
+    );
+    expect(deep.length).toBeGreaterThan(0);
+    const gcText = deep.find(
+      (e) => e.type === "subagent_event" && e.event.type === "text",
+    );
+    expect(gcText && gcText.type === "subagent_event" ? gcText.path[0]!.taskId : "").toBe("tu_child");
+    expect(gcText && gcText.type === "subagent_event" ? gcText.path[1]!.taskId : "").toBe("tu_gc");
+  });
+
+  test("maxDepth 1 restores the no-recursion toolset", () => {
+    expect(createTaskTool({ maxDepth: 1 }).description).toContain("cannot spawn further subagents");
+    expect(createTaskTool({}).description).toContain("can spawn their own subagents");
   });
 
   test("empty subagent report is surfaced as an error", async () => {
@@ -282,12 +391,131 @@ describe("task tool (subagents)", () => {
       ),
       message([], "end_turn"),
     ]);
-    const task = createTaskTool({ client: subClient });
+    const task = createTaskTool({ client: subClient, sessionDir: false });
     const result = await task.execute(
       { description: "x", prompt: "y" },
       { cwd: tmpdir() },
     );
     expect(result.isError).toBe(true);
+  });
+});
+
+describe("task tool: structured output", () => {
+  test("schema forces a structured_output call and returns its JSON", async () => {
+    const subClient = fakeClient([
+      message(
+        [{
+          type: "tool_use", caller: { type: "direct" }, id: "tu_so", name: "structured_output",
+          input: { answer: 42 },
+        }],
+        "tool_use",
+      ),
+      message([{ type: "text", text: "prose that should be ignored", citations: null }], "end_turn"),
+    ]);
+    const task = createTaskTool({ client: subClient, sessionDir: false });
+    const result = await task.execute(
+      {
+        description: "compute",
+        prompt: "compute the answer",
+        schema: { type: "object", properties: { answer: { type: "number" } }, required: ["answer"] },
+      },
+      { cwd: tmpdir() },
+    );
+    expect(result.isError).toBeUndefined();
+    expect(JSON.parse(result.output)).toEqual({ answer: 42 });
+  });
+
+  test("finishing without structured_output is an error the spawner can react to", async () => {
+    const subClient = fakeClient([
+      message([{ type: "text", text: "here is prose instead", citations: null }], "end_turn"),
+    ]);
+    const task = createTaskTool({ client: subClient, sessionDir: false });
+    const result = await task.execute(
+      {
+        description: "compute",
+        prompt: "compute",
+        schema: { type: "object", properties: { answer: { type: "number" } } },
+      },
+      { cwd: tmpdir() },
+    );
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("structured_output");
+  });
+});
+
+describe("task tool: budgets", () => {
+  test("spawn budget exhausts and fails fast", async () => {
+    const subClient = fakeClient([
+      message([{ type: "text", text: "first report", citations: null }], "end_turn"),
+    ]);
+    const task = createTaskTool({ client: subClient, maxSpawns: 1, sessionDir: false });
+    const first = await task.execute({ description: "a", prompt: "p" }, { cwd: tmpdir() });
+    expect(first.isError).toBeUndefined();
+    const second = await task.execute({ description: "b", prompt: "p" }, { cwd: tmpdir() });
+    expect(second.isError).toBe(true);
+    expect(second.output).toContain("budget");
+  });
+
+  test("token budget counts subagent usage and fails fast once exceeded", async () => {
+    const subClient = fakeClient([
+      message([{ type: "text", text: "report", citations: null }], "end_turn"),
+    ]);
+    // The fake usage is 15 tokens per response; a 10-token cap exhausts after one spawn.
+    const task = createTaskTool({ client: subClient, maxSpawnTokens: 10, sessionDir: false });
+    const first = await task.execute({ description: "a", prompt: "p" }, { cwd: tmpdir() });
+    expect(first.isError).toBeUndefined();
+    const second = await task.execute({ description: "b", prompt: "p" }, { cwd: tmpdir() });
+    expect(second.isError).toBe(true);
+    expect(second.output).toContain("token budget");
+  });
+});
+
+describe("task tool: sessions", () => {
+  test("each subagent writes a session file carrying the spawn edge", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "carbon-subsessions-"));
+    const subClient = fakeClient([
+      message([{ type: "text", text: "report", citations: null }], "end_turn"),
+    ]);
+    const task = createTaskTool({ client: subClient, sessionDir: dir });
+    const result = await task.execute(
+      { description: "linked job", prompt: "p" },
+      { cwd: tmpdir(), sessionId: "parent-session-1", toolUseId: "tu_9" },
+    );
+
+    // The result's first line is the machine-readable link to the child session.
+    expect(result.output.startsWith("[session: ")).toBe(true);
+    expect(result.output).toContain("report");
+
+    const files = readdirSync(dir).filter((f) => f.endsWith(".jsonl"));
+    expect(files).toHaveLength(1);
+    const metaLine = JSON.parse(
+      readFileSync(join(dir, files[0]!), "utf8").split("\n")[0]!,
+    );
+    expect(metaLine.parent).toEqual({ sessionId: "parent-session-1", taskId: "tu_9" });
+    expect(metaLine.description).toBe("linked job");
+    expect(result.output.split("\n")[0]).toBe(`[session: ${metaLine.id}]`);
+  });
+});
+
+describe("task tool: kill handle", () => {
+  test("onSpawn's abort kills one task and returns an interrupted result", async () => {
+    const subClient = fakeClient([
+      message(
+        [{ type: "tool_use", caller: { type: "direct" }, id: "tu_1", name: "bash", input: { command: "sleep 999" } }],
+        "tool_use",
+      ),
+    ]);
+    const task = createTaskTool({
+      client: subClient,
+      sessionDir: false,
+      onSpawn: (t) => t.abort(), // mount kills the task the moment it spawns
+    });
+    const result = await task.execute(
+      { description: "doomed", prompt: "p" },
+      { cwd: tmpdir() },
+    );
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("interrupted");
   });
 });
 
@@ -324,7 +552,7 @@ describe("memoryDir plumbing", () => {
       ),
       message([{ type: "text", text: "sub done", citations: null }], "end_turn"),
     ]);
-    const task = createTaskTool({ client: subClient, tools: [probe] });
+    const task = createTaskTool({ client: subClient, tools: [probe], sessionDir: false });
     const result = await task.execute(
       { description: "probe memory", prompt: "probe" },
       { cwd: tmpdir(), memoryDir: memDir },

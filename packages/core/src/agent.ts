@@ -36,6 +36,12 @@ export interface AgentOptions {
   memoryDir?: string;
   /** Compact when the estimated prompt size crosses this many tokens. Default 150k. */
   compactionThreshold?: number;
+  /**
+   * Tool calls in one assistant batch execute concurrently, capped at this
+   * many in flight; excess calls queue. Default 8. Set 1 for strictly
+   * sequential execution.
+   */
+  maxConcurrentTools?: number;
   /** Automatically compact when the threshold is crossed. Default true. */
   autoCompact?: boolean;
   /**
@@ -70,6 +76,7 @@ export class Agent {
   readonly memoryDir?: string;
   readonly compactionThreshold: number;
   readonly autoCompact: boolean;
+  readonly maxConcurrentTools: number;
   readonly thinking: Anthropic.ThinkingConfigParam | null;
   readonly cacheControl: boolean;
   messages: Anthropic.MessageParam[];
@@ -96,6 +103,7 @@ export class Agent {
     this.maxTokens = options.maxTokens ?? 64_000;
     this.compactionThreshold = options.compactionThreshold ?? DEFAULT_COMPACTION_THRESHOLD;
     this.autoCompact = options.autoCompact ?? true;
+    this.maxConcurrentTools = Math.max(1, options.maxConcurrentTools ?? 8);
     this.thinking =
       options.thinking === undefined ? { type: "adaptive", display: "summarized" } : options.thinking;
     this.cacheControl = options.cacheControl ?? true;
@@ -192,37 +200,89 @@ export class Agent {
       const toolCalls = message.content.filter(
         (block): block is Anthropic.ToolUseBlock => block.type === "tool_use",
       );
-      const results: Anthropic.ToolResultBlockParam[] = [];
-      for (const call of toolCalls) {
-        // Interrupted mid-batch: the remaining calls still need results or the
-        // next request would be rejected for an unanswered tool_use.
-        if (signal?.aborted) {
-          results.push({
-            type: "tool_result",
-            tool_use_id: call.id,
-            content: "Interrupted by user before this tool ran.",
-            is_error: true,
-          });
-          continue;
-        }
-        yield { type: "tool_start", id: call.id, name: call.name, input: call.input };
-        const result = await this.executeTool(call.name, call.input, signal);
-        yield { type: "tool_result", id: call.id, name: call.name, result };
-        results.push({
-          type: "tool_result",
-          tool_use_id: call.id,
-          content: result.output,
-          is_error: result.isError ?? false,
-        });
-      }
-      // All results for one assistant turn go back in a single user message.
-      this.pushMessage({ role: "user", content: results });
+      yield* this.runToolBatch(toolCalls, signal);
 
       if (signal?.aborted) {
         yield { type: "done", stopReason: "interrupted" };
         return;
       }
     }
+  }
+
+  /**
+   * Execute one assistant turn's tool calls concurrently (capped at
+   * maxConcurrentTools; excess calls queue) and yield their events as they
+   * happen. Executions push events — tool_start/tool_result plus anything a
+   * tool emits via ctx.emit — onto an internal channel that this generator
+   * drains, so subagent activity streams live instead of arriving after the
+   * fact. Results are appended in tool_use order regardless of completion
+   * order, keeping transcripts deterministic.
+   */
+  private async *runToolBatch(
+    toolCalls: Anthropic.ToolUseBlock[],
+    signal?: AbortSignal,
+  ): AsyncGenerator<AgentEvent, void> {
+    const results: Anthropic.ToolResultBlockParam[] = new Array(toolCalls.length);
+    const queue: AgentEvent[] = [];
+    let wake: (() => void) | null = null;
+    const push = (event: AgentEvent) => {
+      queue.push(event);
+      const w = wake;
+      wake = null;
+      w?.();
+    };
+
+    const runCall = async (index: number): Promise<void> => {
+      const call = toolCalls[index]!;
+      // Interrupted before this call started: it still needs a result or the
+      // next request would be rejected for an unanswered tool_use.
+      if (signal?.aborted) {
+        results[index] = {
+          type: "tool_result",
+          tool_use_id: call.id,
+          content: "Interrupted by user before this tool ran.",
+          is_error: true,
+        };
+        return;
+      }
+      push({ type: "tool_start", id: call.id, name: call.name, input: call.input });
+      const result = await this.executeTool(call, signal, push);
+      push({ type: "tool_result", id: call.id, name: call.name, result });
+      results[index] = {
+        type: "tool_result",
+        tool_use_id: call.id,
+        content: result.output,
+        is_error: result.isError ?? false,
+      };
+    };
+
+    let nextCall = 0;
+    let batchDone = false;
+    const workers = Promise.all(
+      Array.from({ length: Math.min(this.maxConcurrentTools, toolCalls.length) }, async () => {
+        while (nextCall < toolCalls.length) {
+          await runCall(nextCall++);
+        }
+      }),
+    ).finally(() => {
+      batchDone = true;
+      const w = wake;
+      wake = null;
+      w?.();
+    });
+
+    while (!batchDone || queue.length > 0) {
+      if (queue.length > 0) {
+        yield queue.shift()!;
+      } else {
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+        });
+      }
+    }
+    await workers;
+    // All results for one assistant turn go back in a single user message.
+    this.pushMessage({ role: "user", content: results });
   }
 
   /**
@@ -294,16 +354,16 @@ export class Agent {
   }
 
   private async executeTool(
-    name: string,
-    input: unknown,
-    signal?: AbortSignal,
+    call: Anthropic.ToolUseBlock,
+    signal: AbortSignal | undefined,
+    emit: (event: AgentEvent) => void,
   ): Promise<ToolResult> {
-    const tool = this.tools.get(name);
+    const tool = this.tools.get(call.name);
     if (!tool) {
-      return { output: `Unknown tool: ${name}`, isError: true };
+      return { output: `Unknown tool: ${call.name}`, isError: true };
     }
     if (!tool.readOnly) {
-      const decision = await this.canUseTool(tool, input);
+      const decision = await this.canUseTool(tool, call.input);
       if (decision.behavior === "deny") {
         return {
           output: decision.message ?? "The user denied this tool call.",
@@ -311,9 +371,16 @@ export class Agent {
         };
       }
     }
-    const ctx: ToolContext = { cwd: this.cwd, signal, memoryDir: this.memoryDir };
+    const ctx: ToolContext = {
+      cwd: this.cwd,
+      signal,
+      memoryDir: this.memoryDir,
+      emit,
+      toolUseId: call.id,
+      sessionId: this.session?.meta.id,
+    };
     try {
-      const result = await tool.execute(input, ctx);
+      const result = await tool.execute(call.input, ctx);
       return { ...result, output: truncate(result.output) };
     } catch (error) {
       if (signal?.aborted) {

@@ -8,6 +8,16 @@ export interface ToolContext {
   signal?: AbortSignal;
   /** The agent's memory directory, if one is mounted — lets consumers build memory-aware tools without re-plumbing paths. */
   memoryDir?: string;
+  /**
+   * Push an event into the running agent's own event stream. The loop drains
+   * emitted events while tool executions are in flight, so a tool can stream
+   * progress (e.g. subagent activity) instead of being silent until it returns.
+   */
+  emit?: (event: AgentEvent) => void;
+  /** The tool_use id of this call — ties emitted events back to the call. */
+  toolUseId?: string;
+  /** The session id of the agent making this call, if it has a session. */
+  sessionId?: string;
 }
 
 export interface ToolResult {
@@ -44,9 +54,24 @@ export type CanUseTool = (
 
 export type StopReason = Anthropic.Message["stop_reason"] | "interrupted";
 
+/** One edge in a spawn chain: which task call created which agent. */
+export interface TaskRef {
+  /** The task tool_use id — ties to the parent's tool_start/tool_result. */
+  taskId: string;
+  /** The spawned agent's session id (or a generated id if sessions are off). */
+  agentId: string;
+  /** The spawner's 3-6 word label for the task. */
+  description: string;
+}
+
 /**
  * Everything the agent does is surfaced as a stream of events. Mounts render
  * these however they like; the core never writes to stdout.
+ *
+ * Subagent activity arrives flat, never nested: a `subagent_event` wraps a raw
+ * leaf event with the full spawn chain in `path` (root's child first), and
+ * `event` is itself never a `subagent_event`. Mounts reconstruct the live tree
+ * from `path` alone; mounts that ignore the type behave as before.
  */
 export type AgentEvent =
   | { type: "thinking"; text: string }
@@ -56,4 +81,5 @@ export type AgentEvent =
   | { type: "response_end"; stopReason: StopReason; usage: Anthropic.Usage }
   | { type: "compaction_start" }
   | { type: "compaction_end"; summary: string; foldedMessages: number }
+  | { type: "subagent_event"; path: TaskRef[]; event: AgentEvent }
   | { type: "done"; stopReason: StopReason };

@@ -8,6 +8,10 @@ export interface SessionMeta {
   createdAt: string;
   cwd: string;
   model: string;
+  /** Spawn edge: set when this session belongs to a spawned subagent. */
+  parent?: { sessionId: string; taskId: string };
+  /** The task label the spawner gave this agent. */
+  description?: string;
 }
 
 interface StoredMessage {
@@ -38,7 +42,14 @@ export class Session {
     return join(homedir(), ".carbon", "sessions");
   }
 
-  static create(options: { cwd: string; model: string }): Session {
+  static create(options: {
+    cwd: string;
+    model: string;
+    /** Directory for the session file. Defaults to the ordinary sessions dir. */
+    dir?: string;
+    parent?: SessionMeta["parent"];
+    description?: string;
+  }): Session {
     const createdAt = new Date();
     const id = `${createdAt.toISOString().replace(/[:.]/g, "-")}-${Math.random().toString(36).slice(2, 8)}`;
     const meta: SessionMeta = {
@@ -46,9 +57,12 @@ export class Session {
       createdAt: createdAt.toISOString(),
       cwd: options.cwd,
       model: options.model,
+      ...(options.parent ? { parent: options.parent } : {}),
+      ...(options.description ? { description: options.description } : {}),
     };
-    mkdirSync(Session.dir(), { recursive: true });
-    const filePath = join(Session.dir(), `${id}.jsonl`);
+    const dir = options.dir ?? Session.dir();
+    mkdirSync(dir, { recursive: true });
+    const filePath = join(dir, `${id}.jsonl`);
     appendFileSync(filePath, `${JSON.stringify({ type: "meta", ...meta })}\n`);
     return new Session(filePath, meta);
   }

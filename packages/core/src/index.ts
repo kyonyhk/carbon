@@ -17,6 +17,7 @@ export type {
   CanUseTool,
   PermissionDecision,
   StopReason,
+  TaskRef,
   Tool,
   ToolContext,
   ToolResult,

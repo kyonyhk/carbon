@@ -117,12 +117,11 @@ interface Totals {
   cacheRead: number;
 }
 
-/** Task tool wired for the terminal: nested activity lines + shared token totals. */
+/** Task tool wired for the terminal. Subagent activity arrives as subagent_events in the main stream. */
 function makeTaskTool(options: {
   model: string;
   cwd: string;
   hook: CanUseTool;
-  totals: Totals;
   thinking: AgentOptions["thinking"];
   cacheControl: boolean;
 }): Tool {
@@ -132,19 +131,23 @@ function makeTaskTool(options: {
     canUseTool: options.hook,
     thinking: options.thinking,
     cacheControl: options.cacheControl,
-    onEvent: (event, task) => {
-      if (event.type === "tool_start") {
-        const preview = toolPreview(event.name, event.input);
-        const short = preview.length > 80 ? `${preview.slice(0, 80)}…` : preview;
-        process.stdout.write(dim(`    · [${task.description}] ${event.name} ${short}\n`));
-      } else if (event.type === "response_end") {
-        options.totals.input +=
-          event.usage.input_tokens + (event.usage.cache_creation_input_tokens ?? 0);
-        options.totals.cacheRead += event.usage.cache_read_input_tokens ?? 0;
-        options.totals.output += event.usage.output_tokens;
-      }
-    },
   });
+}
+
+/**
+ * Tool calls now run concurrently, so approval requests can arrive at the
+ * same time — chain them so the terminal shows one question at a time.
+ */
+function serializePrompts(hook: CanUseTool): CanUseTool {
+  let chain: Promise<unknown> = Promise.resolve();
+  return (tool, input) => {
+    const next = chain.then(() => hook(tool, input));
+    chain = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  };
 }
 
 function makePermissionHook(options: {
@@ -154,7 +157,7 @@ function makePermissionHook(options: {
   /** Signal of the currently active run, so Ctrl+C cancels a pending prompt. */
   getSignal?: () => AbortSignal | undefined;
 }): CanUseTool {
-  return async (tool, input) => {
+  return serializePrompts(async (tool, input) => {
     if (options.yolo || options.alwaysAllowed.has(tool.name)) {
       return { behavior: "allow" };
     }
@@ -185,7 +188,7 @@ function makePermissionHook(options: {
     }
     if (choice === "y" || choice === "yes") return { behavior: "allow" };
     return { behavior: "deny" };
-  };
+  });
 }
 
 const BANNER = [
@@ -242,6 +245,25 @@ async function renderRun(
           usage.input_tokens + (usage.cache_creation_input_tokens ?? 0);
         totals.cacheRead += usage.cache_read_input_tokens ?? 0;
         totals.output += usage.output_tokens;
+        break;
+      }
+      case "subagent_event": {
+        // One dim line per subagent tool call, indented by spawn depth;
+        // subagent usage folds into the shared totals.
+        const inner = event.event;
+        if (inner.type === "tool_start") {
+          const label = event.path.map((ref) => ref.description).join(" › ");
+          const preview = toolPreview(inner.name, inner.input);
+          const short = preview.length > 80 ? `${preview.slice(0, 80)}…` : preview;
+          const indent = "  ".repeat(event.path.length - 1);
+          process.stdout.write(dim(`    ${indent}· [${label}] ${inner.name} ${short}\n`));
+        } else if (inner.type === "response_end") {
+          const usage = inner.usage as Anthropic.Usage;
+          totals.input +=
+            usage.input_tokens + (usage.cache_creation_input_tokens ?? 0);
+          totals.cacheRead += usage.cache_read_input_tokens ?? 0;
+          totals.output += usage.output_tokens;
+        }
         break;
       }
       case "compaction_start":
@@ -307,7 +329,7 @@ async function main() {
       cacheControl,
       tools: [
         ...coreTools(),
-        makeTaskTool({ model: args.model, cwd, hook, totals, thinking, cacheControl }),
+        makeTaskTool({ model: args.model, cwd, hook, thinking, cacheControl }),
       ],
       session,
       messages,
@@ -356,7 +378,7 @@ async function main() {
     cacheControl,
     tools: [
       ...coreTools(),
-      makeTaskTool({ model: args.model, cwd, hook, totals, thinking, cacheControl }),
+      makeTaskTool({ model: args.model, cwd, hook, thinking, cacheControl }),
     ],
     session,
     messages,
